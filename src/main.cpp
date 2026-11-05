@@ -43,6 +43,8 @@
 #include <thread>
 #include <vector>
 
+#include "update.h"
+
 using Microsoft::WRL::ComPtr;
 
 namespace {
@@ -61,6 +63,14 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
+constexpr const char *kVersion = "1.1.1";      // must equal --version given to tools/publish.py for this build
+// Where updates come from when nothing else is configured. Replace with your own server or GitHub repository
+// (--update-url / --update-github / spatial-bridge.conf).
+constexpr const char *kDefaultUpdateSource = "https://media-dl.ksfhost.de/api/public/spatial-bridge/latest.json";
+std::vector<std::string> g_update_sources;      // manifest addresses, tried in order
+std::atomic<bool> g_auto_update{true};
+HANDLE g_update_now = nullptr;                  // event: "check now" (tray menu)
+HWND g_hwnd = nullptr;
 std::atomic<bool> g_normal_priority{false};     // --normal-priority: leave scheduling alone
 
 // The audio thread feeds a device that wants a buffer every few milliseconds; if a game or a render job keeps
@@ -290,7 +300,7 @@ bool recv_exact(SOCKET s, void *d, size_t n, const std::atomic<bool> &stop) {
 
 std::string info_json() {
     std::lock_guard<std::mutex> lock(g_mu);
-    return "{\"type\":\"info\",\"device\":\"" + json_escape(g_device) + "\",\"bed\":\"" + g_bed + "\",\"heights\":" + (g_has_heights ? "true" : "false") + "}";
+    return "{\"type\":\"info\",\"version\":\"" + std::string(kVersion) + "\",\"device\":\"" + json_escape(g_device) + "\",\"bed\":\"" + g_bed + "\",\"heights\":" + (g_has_heights ? "true" : "false") + "}";
 }
 
 void handle_message(const std::string &text) {
@@ -622,9 +632,54 @@ void audio_thread() {
     CoUninitialize();
 }
 
+// ---------------------------------------------------------------- self-update
+constexpr UINT WM_APP_QUIT = WM_APP + 2;
+
+bool streaming_now() {                                      // audio flowing in the last few seconds?
+    uint64_t a = g_frames_in;
+    Sleep(3000);
+    return g_frames_in != a;
+}
+
+void update_thread() {
+    bool first = true;
+    for (;;) {
+        // first check 30 s after start, then every 6 hours, or at once when asked from the tray
+        DWORD wait = first ? 30000 : 6 * 3600 * 1000;
+        first = false;
+        DWORD w = WaitForSingleObject(g_update_now, wait);
+        if (g_quit) return;
+        bool manual = (w == WAIT_OBJECT_0);
+        if (!g_auto_update && !manual) continue;
+        std::string last_err;
+        bool any_ok = false, applied = false;
+        for (const auto &src : g_update_sources) {
+            upd::Found f;
+            std::string err;
+            int r = upd::check_source(src, kVersion, f, err);
+            if (r < 0) { last_err = err; continue; }
+            any_ok = true;
+            if (r == 0) continue;
+            set_status("Update " + f.version + " ready");
+            while (!g_quit && !manual && streaming_now()) {}   // never cut the sound: wait for a pause (a manual check applies now)
+            if (g_quit) return;
+            std::string ierr;
+            if (upd::install_and_relaunch(f.exe, ierr)) {
+                set_status("Updated to " + f.version + ", restarting");
+                g_quit = true;
+                if (g_hwnd) PostMessageW(g_hwnd, WM_APP_QUIT, 0, 0);
+                applied = true;
+            } else { last_err = ierr; set_status("Update failed: " + ierr); }
+            break;
+        }
+        if (applied) return;
+        if (manual) set_status(any_ok && last_err.empty() ? std::string("Up to date (") + kVersion + ")" : "Update check failed: " + last_err);
+    }
+}
+
 // ---------------------------------------------------------------- tray icon
 constexpr UINT WM_TRAY = WM_USER + 1;
-constexpr UINT ID_QUIT = 1, ID_AUTOSTART = 2;
+constexpr UINT ID_QUIT = 1, ID_AUTOSTART = 2, ID_UPDATE = 3;
 const wchar_t *kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const wchar_t *kRunName = L"KSF Spatial Bridge";
 
@@ -654,9 +709,10 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         { std::lock_guard<std::mutex> lock(g_mu); st = g_status; }
         std::wstring ws(st.begin(), st.end());
         HMENU menu = CreatePopupMenu();
-        AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, (L"KSF Spatial Bridge: " + ws).c_str());
+        AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, (L"KSF Spatial Bridge " + upd::widen(kVersion) + L": " + ws).c_str());
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (autostart_on() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
+        AppendMenuW(menu, MF_STRING, ID_UPDATE, L"Check for updates now");
         AppendMenuW(menu, MF_STRING, ID_QUIT, L"Quit");
         POINT pt;
         GetCursorPos(&pt);
@@ -665,8 +721,10 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         DestroyMenu(menu);
         if (cmd == ID_QUIT) { g_quit = true; PostQuitMessage(0); }
         else if (cmd == ID_AUTOSTART) set_autostart(!autostart_on());
+        else if (cmd == ID_UPDATE) { set_status("Checking for updates"); SetEvent(g_update_now); }
         return 0;
     }
+    if (m == WM_APP_QUIT) { PostQuitMessage(0); return 0; }
     if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
     return DefWindowProcW(h, m, w, l);
 }
@@ -676,6 +734,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     std::FILE *fp_ = nullptr;
     int port = 47321;
+    DWORD after_update_pid = 0;
     std::vector<std::string> origins;
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -690,15 +749,48 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         else if (a == L"--origin" && i + 1 < argc) origins.push_back(narrow(argv[++i]));
         else if (a == L"--null") g_null = true;
         else if (a == L"--normal-priority") g_normal_priority = true;
+        else if (a == L"--update-url" && i + 1 < argc) g_update_sources.push_back(narrow(argv[++i]));
+        else if (a == L"--update-github" && i + 1 < argc) g_update_sources.push_back("https://github.com/" + narrow(argv[++i]) + "/releases/latest/download/latest.json");
+        else if (a == L"--no-update") g_auto_update = false;
+        else if (a == L"--after-update" && i + 1 < argc) after_update_pid = (DWORD)_wtoi(argv[++i]);
         else if (a == L"--help") {
             if (AttachConsole(ATTACH_PARENT_PROCESS)) freopen_s(&fp_, "CONOUT$", "w", stdout);
-            std::printf("ksf-spatial-bridge [--port N] [--origin URL] [--null] [--normal-priority]\n");
+            std::printf("ksf-spatial-bridge [--port N] [--origin URL] [--null] [--normal-priority] [--update-url URL] [--update-github OWNER/REPO] [--no-update]\n");
             return 0;
         }
     }
     if (g_null) {
         if (AttachConsole(ATTACH_PARENT_PROCESS)) { freopen_s(&fp_, "CONOUT$", "w", stdout); }
     }
+    // Settings that must survive the autostart (which carries no arguments): spatial-bridge.conf next to the exe,
+    // lines  update-url=https://...  |  update-github=owner/repo  |  update=off  |  origin=https://...
+    {
+        wchar_t self[MAX_PATH];
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        std::wstring conf = self;
+        size_t cut = conf.find_last_of(L'\\');
+        conf = conf.substr(0, cut + 1) + L"spatial-bridge.conf";
+        std::FILE *cf = nullptr;
+        _wfopen_s(&cf, conf.c_str(), L"r");
+        if (cf) {
+            char line[1024];
+            while (std::fgets(line, sizeof(line), cf)) {
+                std::string l = line;
+                while (!l.empty() && (l.back() == '\n' || l.back() == '\r' || l.back() == ' ')) l.pop_back();
+                size_t eq = l.find('=');
+                if (l.empty() || l[0] == '#' || eq == std::string::npos) continue;
+                std::string k = l.substr(0, eq), v = l.substr(eq + 1);
+                if (k == "update-url") g_update_sources.push_back(v);
+                else if (k == "update-github") g_update_sources.push_back("https://github.com/" + v + "/releases/latest/download/latest.json");
+                else if (k == "update" && v == "off") g_auto_update = false;
+                else if (k == "origin") origins.push_back(v);
+            }
+            std::fclose(cf);
+        }
+        if (g_update_sources.empty()) g_update_sources.push_back(kDefaultUpdateSource);
+    }
+    upd::wait_for_predecessor(after_update_pid);          // a restart after an update: let the old copy end first
+    upd::remove_old_copy();
     // One copy only.
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\KsfSpatialBridge");
     if (GetLastError() == ERROR_ALREADY_EXISTS && !g_null) return 0;
@@ -708,6 +800,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
 
     std::thread net(net_thread, port, origins);
     std::thread audio(audio_thread);
+    g_update_now = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    std::thread updater(update_thread);
 
     if (g_null) {                                           // no tray: run until killed
         while (!g_quit) Sleep(200);
@@ -717,7 +811,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         wc.hInstance = inst;
         wc.lpszClassName = L"KsfSpatialBridgeWnd";
         RegisterClassW(&wc);
-        HWND hwnd = CreateWindowW(wc.lpszClassName, L"KSF Spatial Bridge", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, inst, nullptr);
+        HWND hwnd = g_hwnd = CreateWindowW(wc.lpszClassName, L"KSF Spatial Bridge", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, inst, nullptr);
         NOTIFYICONDATAW nid{};
         nid.cbSize = sizeof(nid);
         nid.hWnd = hwnd;
@@ -732,8 +826,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         Shell_NotifyIconW(NIM_DELETE, &nid);
     }
     g_quit = true;
+    SetEvent(g_update_now);
     net.join();
     audio.join();
+    updater.join();
     WSACleanup();
     if (single) CloseHandle(single);
     return 0;

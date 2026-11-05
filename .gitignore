@@ -1,3 +1,6 @@
 out/
 ksf-null.log
 *.zip
+_t/
+dist/
+build.log

@@ -33,6 +33,46 @@ Visual Studio 2022 Build Tools (C++ workload), then `build.cmd`. No other depend
 
 `--port N` (default 47321), `--origin URL`, `--null` (receive and measure only; writes `ksf-null.log`), `--normal-priority`.
 
+## Updates
+
+The app updates itself. Thirty seconds after it starts, and every six hours after that, it reads a small signed
+manifest (`latest.json`) from an update source, and if the version there is newer it downloads the exe, checks it,
+swaps itself in place and restarts. It waits for a pause in the audio first, so the music is never cut. The tray
+menu has *Check for updates now*.
+
+An update source is either
+
+* a **self-hosted AtriHord** server: `--update-url https://your.server/api/public/spatial-bridge/latest.json`
+  (the server serves the two files from `web_files/app/spatial-bridge/`), or
+* a **GitHub release**: `--update-github OWNER/REPO` (reads `releases/latest/download/latest.json`; attach
+  `latest.json` and `ksf-spatial-bridge.exe` to each release).
+
+Sources can also be set in `spatial-bridge.conf` next to the exe (the autostart carries no arguments):
+
+```
+update-url=https://your.server/api/public/spatial-bridge/latest.json
+update-github=OWNER/REPO
+update=off            # never check on its own (the tray item still works)
+```
+
+`--no-update` does the same for one run. With no source given the built-in default (`kDefaultUpdateSource` in
+`src/main.cpp`) is used: change it before building your own copy.
+
+**Safety.** HTTPS only, and an update is installed only if the exe's SHA-256 matches the manifest *and* the
+manifest's ECDSA P-256 signature verifies against the public key compiled into the app (`src/update_pubkey.h`).
+A hacked server or release page cannot push code, and older versions are refused. The program folder must be
+writable (it is, in your user folder; not in `Program Files`).
+
+**Releasing** (maintainer): bump `kVersion` in `src/main.cpp`, build, then
+
+```
+python tools/publish.py --exe out/ksf-spatial-bridge.exe --version X.Y.Z --key PATH/update_private.pem --out release/
+```
+
+and put `release/latest.json` + `release/ksf-spatial-bridge.exe` on the server or the GitHub release. Keep the
+private key out of the repository and backed up; `tools/make_pubkey_header.py KEY.pem` regenerates the public
+half for a new key (apps built with the old key then cannot update to builds signed with the new one).
+
 ## Scheduling
 
 The audio thread registers with the Windows Multimedia Class Scheduler (task "Pro Audio", critical priority; falls
