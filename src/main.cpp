@@ -25,6 +25,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <shellapi.h>
+#include <avrt.h>
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <spatialaudioclient.h>
@@ -60,6 +61,25 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
+std::atomic<bool> g_normal_priority{false};     // --normal-priority: leave scheduling alone
+
+// The audio thread feeds a device that wants a buffer every few milliseconds; if a game or a render job keeps
+// the cores busy, a normally scheduled thread is late and the sound crackles. Register it with the Multimedia
+// Class Scheduler ("Pro Audio" is the highest class a normal user may use, "Audio" the fallback) and ask for
+// critical priority inside it. Without MMCSS the thread priority alone is raised.
+void boost_audio_thread() {
+    if (g_normal_priority) return;
+    DWORD task = 0;
+    HANDLE h = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task);
+    if (!h) { task = 0; h = AvSetMmThreadCharacteristicsW(L"Audio", &task); }
+    if (h) AvSetMmThreadPriority(h, AVRT_PRIORITY_CRITICAL);
+    else SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+}
+
+// The network thread hands the audio thread its samples: it must not wait behind ordinary work either.
+void boost_net_thread() {
+    if (!g_normal_priority) SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+}
 std::atomic<int> g_client_rate{kOutRate};
 std::atomic<bool> g_client_connected{false};
 
@@ -376,6 +396,7 @@ void serve_client(SOCKET c, const std::vector<std::string> &extra_origins) {
 }
 
 void net_thread(int port, std::vector<std::string> extra_origins) {
+    boost_net_thread();
     SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     sockaddr_in a{};
     a.sin_family = AF_INET;
@@ -557,6 +578,7 @@ bool run_spatial_once() {
 
 void audio_thread() {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    boost_audio_thread();
     while (!g_quit) {
         if (g_null) {                                        // test mode: drain and measure
             {
@@ -667,9 +689,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (a == L"--port" && i + 1 < argc) port = _wtoi(argv[++i]);
         else if (a == L"--origin" && i + 1 < argc) origins.push_back(narrow(argv[++i]));
         else if (a == L"--null") g_null = true;
+        else if (a == L"--normal-priority") g_normal_priority = true;
         else if (a == L"--help") {
             if (AttachConsole(ATTACH_PARENT_PROCESS)) freopen_s(&fp_, "CONOUT$", "w", stdout);
-            std::printf("ksf-spatial-bridge [--port N] [--origin URL] [--null]\n");
+            std::printf("ksf-spatial-bridge [--port N] [--origin URL] [--null] [--normal-priority]\n");
             return 0;
         }
     }

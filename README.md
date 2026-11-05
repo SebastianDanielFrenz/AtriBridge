@@ -31,6 +31,12 @@ Visual Studio 2022 Build Tools (C++ workload), then `build.cmd`. No other depend
 
 ## Options
 
-`--port N` (default 47321), `--origin URL`, `--null` (receive and measure only; writes `ksf-null.log`).
+`--port N` (default 47321), `--origin URL`, `--null` (receive and measure only; writes `ksf-null.log`), `--normal-priority`.
+
+## Scheduling
+
+The audio thread registers with the Windows Multimedia Class Scheduler (task "Pro Audio", critical priority; falls
+back to "Audio", then to plain time-critical thread priority) and the network thread runs above normal, so
+heavy load from a game or a render does not make the sound crackle. `--normal-priority` turns that off.
 
 MIT licence.
