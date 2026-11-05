@@ -1,0 +1,717 @@
+// KSF Spatial Bridge - plays the stereo the media-dl music page sends it through Windows Spatial
+// Sound, so a Dolby Atmos / DTS:X / Windows Sonic device gets its ear-level AND height speakers
+// (a browser is only given the 7.1 bed). Windows only.
+//
+//   page --(ws://127.0.0.1:47321, float32 stereo)--> this app --(ISpatialAudioClient)--> speakers
+//
+// Messages from the page (text frames, JSON): {"type":"hello"|"mode","rate":44100,
+// "mode":"all"|"stereo","heights":true|false}. Binary frames are interleaved float32 stereo at
+// "rate". The app answers {"type":"info","device":...,"bed":"7.1.4","heights":true} once Windows
+// Spatial Sound works on the default output, and {"type":"gone"} when it stops working.
+//
+// "all" plays every ear-level speaker at the same level (the left-side speakers get L, the right
+// ones R, the centre (L+R)/2); heights adds the height speakers the same way. "stereo" is the
+// front pair only. The LFE stays silent.
+//
+// Command line: --port N, --origin URL (extra allowed page origin), --null (no audio output: only
+// receives and measures, for tests; needs a console), --help.
+// No dependencies beyond the Windows SDK. MIT licence (see LICENSE).
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <shellapi.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <spatialaudioclient.h>
+#include <functiondiscoverykeys_devpkey.h>
+#include <wrl/client.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+using Microsoft::WRL::ComPtr;
+
+namespace {
+
+constexpr int kOutRate = 48000;
+constexpr size_t kRingFrames = kOutRate;          // 1 s
+constexpr size_t kMaxQueued = kOutRate / 4;       // above 250 ms: drop to the target (clock drift)
+constexpr size_t kTargetQueued = kOutRate / 10;   // 100 ms
+constexpr size_t kPrime = kOutRate * 6 / 100;     // start playing once 60 ms are queued
+
+// ---------------------------------------------------------------- state shared by the threads
+struct Settings {
+    std::atomic<bool> all{true};
+    std::atomic<bool> heights{false};
+} g_set;
+
+std::atomic<bool> g_quit{false};
+std::atomic<bool> g_null{false};
+std::atomic<int> g_client_rate{kOutRate};
+std::atomic<bool> g_client_connected{false};
+
+std::mutex g_mu;                       // ring, status text
+std::vector<float> g_ring(kRingFrames * 2, 0.0f);
+size_t g_rd = 0, g_count = 0;          // read index (frames), queued frames
+std::string g_status = "Starting";
+std::string g_device;
+std::string g_bed;
+bool g_has_heights = false;
+bool g_spatial_ok = false;
+std::atomic<uint64_t> g_frames_in{0}, g_underruns{0};
+
+// info changes the net thread must announce
+std::atomic<int> g_info_version{0};
+
+void set_status(const std::string &s) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    g_status = s;
+}
+
+// ---------------------------------------------------------------- SHA-1 and base64 (the WebSocket handshake)
+struct Sha1 {
+    uint32_t h[5] = {0x67452301u, 0xEFCDAB89u, 0x98BADCFEu, 0x10325476u, 0xC3D2E1F0u};
+    uint8_t buf[64];
+    size_t n = 0;
+    uint64_t total = 0;
+    static uint32_t rol(uint32_t v, int b) { return (v << b) | (v >> (32 - b)); }
+    void block(const uint8_t *p) {
+        uint32_t w[80];
+        for (int i = 0; i < 16; ++i) w[i] = (uint32_t)p[i * 4] << 24 | (uint32_t)p[i * 4 + 1] << 16 | (uint32_t)p[i * 4 + 2] << 8 | p[i * 4 + 3];
+        for (int i = 16; i < 80; ++i) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4];
+        for (int i = 0; i < 80; ++i) {
+            uint32_t f, k;
+            if (i < 20) { f = (b & c) | (~b & d); k = 0x5A827999u; }
+            else if (i < 40) { f = b ^ c ^ d; k = 0x6ED9EBA1u; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8F1BBCDCu; }
+            else { f = b ^ c ^ d; k = 0xCA62C1D6u; }
+            uint32_t t = rol(a, 5) + f + e + k + w[i];
+            e = d; d = c; c = rol(b, 30); b = a; a = t;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    }
+    void add(const void *data, size_t len) {
+        auto p = static_cast<const uint8_t *>(data);
+        total += len;
+        while (len) {
+            size_t take = std::min(len, sizeof(buf) - n);
+            std::memcpy(buf + n, p, take);
+            n += take; p += take; len -= take;
+            if (n == 64) { block(buf); n = 0; }
+        }
+    }
+    void finish(uint8_t out[20]) {
+        uint64_t bits = total * 8;
+        uint8_t pad = 0x80;
+        add(&pad, 1);
+        uint8_t zero = 0;
+        while (n != 56) add(&zero, 1);
+        uint8_t len[8];
+        for (int i = 0; i < 8; ++i) len[i] = (uint8_t)(bits >> (56 - 8 * i));
+        add(len, 8);
+        for (int i = 0; i < 5; ++i) { out[i * 4] = (uint8_t)(h[i] >> 24); out[i * 4 + 1] = (uint8_t)(h[i] >> 16); out[i * 4 + 2] = (uint8_t)(h[i] >> 8); out[i * 4 + 3] = (uint8_t)h[i]; }
+    }
+};
+
+std::string base64(const uint8_t *d, size_t n) {
+    static const char *t = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string o;
+    for (size_t i = 0; i < n; i += 3) {
+        uint32_t v = d[i] << 16 | (i + 1 < n ? d[i + 1] << 8 : 0) | (i + 2 < n ? d[i + 2] : 0);
+        o += t[v >> 18 & 63]; o += t[v >> 12 & 63];
+        o += i + 1 < n ? t[v >> 6 & 63] : '='; o += i + 2 < n ? t[v & 63] : '=';
+    }
+    return o;
+}
+
+std::string accept_key(const std::string &key) {
+    Sha1 s;
+    s.add(key.data(), key.size());
+    static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    s.add(guid, sizeof(guid) - 1);
+    uint8_t d[20];
+    s.finish(d);
+    return base64(d, 20);
+}
+
+// ---------------------------------------------------------------- tiny JSON field reader (flat objects we control)
+std::string json_str(const std::string &j, const char *key) {
+    std::string k = std::string("\"") + key + "\"";
+    size_t p = j.find(k);
+    if (p == std::string::npos) return {};
+    p = j.find(':', p + k.size());
+    if (p == std::string::npos) return {};
+    ++p;
+    while (p < j.size() && (j[p] == ' ' || j[p] == '\t')) ++p;
+    if (p < j.size() && j[p] == '"') {
+        size_t e = j.find('"', p + 1);
+        return e == std::string::npos ? std::string() : j.substr(p + 1, e - p - 1);
+    }
+    size_t e = j.find_first_of(",}", p);
+    return j.substr(p, e == std::string::npos ? std::string::npos : e - p);
+}
+
+std::string json_escape(const std::string &s) {
+    std::string o;
+    for (char c : s) { if (c == '"' || c == '\\') o += '\\'; if ((unsigned char)c >= 32) o += c; }
+    return o;
+}
+
+// ---------------------------------------------------------------- the ring and the resampler
+// Input arrives at the page's rate; the ring holds 48 kHz stereo. Linear interpolation, streaming:
+// `inbuf` keeps the not-yet-consumed input frames, `pos` is the fractional read position in it.
+struct Resampler {
+    std::vector<float> inbuf;
+    double pos = 0.0;
+    void reset() { inbuf.clear(); pos = 0.0; }
+    void push(const float *frames, size_t n, int rate) {
+        std::lock_guard<std::mutex> lock(g_mu);
+        auto put = [](float l, float r) {
+            if (g_count >= kRingFrames) return;
+            size_t w = (g_rd + g_count) % kRingFrames;
+            g_ring[w * 2] = l; g_ring[w * 2 + 1] = r;
+            ++g_count;
+        };
+        if (rate == kOutRate) {
+            for (size_t i = 0; i < n; ++i) put(frames[i * 2], frames[i * 2 + 1]);
+        } else {
+            inbuf.insert(inbuf.end(), frames, frames + n * 2);
+            const double step = (double)rate / kOutRate;
+            const size_t have = inbuf.size() / 2;
+            while (pos + 1.0 < (double)have) {
+                size_t i = (size_t)pos;
+                float f = (float)(pos - (double)i);
+                put(inbuf[i * 2] + (inbuf[i * 2 + 2] - inbuf[i * 2]) * f, inbuf[i * 2 + 1] + (inbuf[i * 2 + 3] - inbuf[i * 2 + 1]) * f);
+                pos += step;
+            }
+            size_t drop = (size_t)pos;
+            if (drop > 0) {
+                inbuf.erase(inbuf.begin(), inbuf.begin() + (std::ptrdiff_t)(drop * 2));
+                pos -= (double)drop;
+            }
+        }
+        if (g_count > kMaxQueued) {                      // the page's clock runs faster: skip ahead
+            size_t cut = g_count - kTargetQueued;
+            g_rd = (g_rd + cut) % kRingFrames;
+            g_count -= cut;
+        }
+    }
+};
+
+// Pulls up to `frames` from the ring into planar l/r; returns how many it got.
+size_t ring_pull(float *l, float *r, size_t frames, bool &primed) {
+    std::lock_guard<std::mutex> lock(g_mu);
+    if (!primed && g_count >= kPrime) primed = true;
+    if (!primed) return 0;
+    size_t got = std::min(frames, g_count);
+    for (size_t i = 0; i < got; ++i) {
+        size_t k = (g_rd + i) % kRingFrames;
+        l[i] = g_ring[k * 2]; r[i] = g_ring[k * 2 + 1];
+    }
+    g_rd = (g_rd + got) % kRingFrames;
+    g_count -= got;
+    if (got < frames) { primed = false; g_underruns++; }
+    return got;
+}
+
+// ---------------------------------------------------------------- the WebSocket server
+bool origin_allowed(const std::string &origin, const std::vector<std::string> &extra) {
+    if (origin.empty()) return true;                       // not a browser
+    static const char *ok[] = {"https://media-dl.ksfhost.de", "https://music.ksfhost.de", "http://localhost", "http://127.0.0.1", "https://localhost"};
+    for (const char *o : ok) if (origin.rfind(o, 0) == 0) return true;
+    for (const auto &o : extra) if (origin == o) return true;
+    return false;
+}
+
+bool send_all(SOCKET s, const void *d, int n) {
+    auto p = static_cast<const char *>(d);
+    while (n > 0) { int k = send(s, p, n, 0); if (k <= 0) return false; p += k; n -= k; }
+    return true;
+}
+
+bool send_frame(SOCKET s, uint8_t opcode, const std::string &payload) {
+    std::string f;
+    f += (char)(0x80 | opcode);
+    if (payload.size() < 126) f += (char)payload.size();
+    else if (payload.size() < 65536) { f += (char)126; f += (char)(payload.size() >> 8); f += (char)payload.size(); }
+    else { f += (char)127; for (int i = 7; i >= 0; --i) f += (char)((uint64_t)payload.size() >> (8 * i)); }
+    f += payload;
+    return send_all(s, f.data(), (int)f.size());
+}
+
+bool recv_exact(SOCKET s, void *d, size_t n, const std::atomic<bool> &stop) {
+    auto p = static_cast<char *>(d);
+    while (n > 0) {
+        int k = recv(s, p, (int)n, 0);
+        if (k == 0) return false;
+        if (k < 0) {
+            int e = WSAGetLastError();
+            if (e == WSAETIMEDOUT && !stop && !g_quit) continue;
+            return false;
+        }
+        p += k; n -= k;
+    }
+    return true;
+}
+
+std::string info_json() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    return "{\"type\":\"info\",\"device\":\"" + json_escape(g_device) + "\",\"bed\":\"" + g_bed + "\",\"heights\":" + (g_has_heights ? "true" : "false") + "}";
+}
+
+void handle_message(const std::string &text) {
+    std::string type = json_str(text, "type");
+    std::string rate = json_str(text, "rate");
+    if (!rate.empty()) {
+        int r = std::atoi(rate.c_str());
+        if (r >= 8000 && r <= 192000) g_client_rate = r;
+    }
+    std::string mode = json_str(text, "mode");
+    if (!mode.empty()) g_set.all = mode != "stereo";
+    std::string hg = json_str(text, "heights");
+    if (!hg.empty()) g_set.heights = hg == "true";
+    (void)type;
+}
+
+void serve_client(SOCKET c, const std::vector<std::string> &extra_origins) {
+    DWORD to = 500;
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof(to));
+    BOOL nodelay = TRUE;
+    setsockopt(c, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay));
+    std::atomic<bool> never{false};
+    // ---- handshake
+    std::string req;
+    char ch;
+    while (req.size() < 8192 && req.find("\r\n\r\n") == std::string::npos) {
+        if (!recv_exact(c, &ch, 1, never)) return;
+        req += ch;
+    }
+    auto header = [&](const char *name) {
+        std::string low = req, key = std::string("\r\n") + name + ":";
+        std::transform(low.begin(), low.end(), low.begin(), [](unsigned char x) { return (char)std::tolower(x); });
+        std::string lk = key;
+        std::transform(lk.begin(), lk.end(), lk.begin(), [](unsigned char x) { return (char)std::tolower(x); });
+        size_t p = low.find(lk);
+        if (p == std::string::npos) return std::string();
+        p += lk.size();
+        size_t e = req.find("\r\n", p);
+        std::string v = req.substr(p, e - p);
+        size_t a = v.find_first_not_of(" \t");
+        return a == std::string::npos ? std::string() : v.substr(a);
+    };
+    std::string key = header("Sec-WebSocket-Key");
+    if (key.empty() || !origin_allowed(header("Origin"), extra_origins)) {
+        const char *no = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        send_all(c, no, (int)std::strlen(no));
+        return;
+    }
+    std::string resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept_key(key) + "\r\n\r\n";
+    if (!send_all(c, resp.data(), (int)resp.size())) return;
+    g_client_connected = true;
+    Resampler rs;
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        g_count = 0;
+    }
+    int announced = -1;
+    std::string message;
+    uint8_t message_op = 0;
+    // The reader must also announce info changes; a short timeout on recv lets it look.
+    for (;;) {
+        if (g_quit) break;
+        int v = g_info_version;
+        if (v != announced) {
+            announced = v;
+            bool ok;
+            { std::lock_guard<std::mutex> lock(g_mu); ok = g_spatial_ok || g_null; }
+            if (!send_frame(c, 1, ok ? info_json() : std::string("{\"type\":\"gone\"}"))) break;
+        }
+        uint8_t h[2];
+        int k = recv(c, (char *)h, 1, 0);
+        if (k == 0) break;
+        if (k < 0) { if (WSAGetLastError() == WSAETIMEDOUT) continue; break; }
+        if (!recv_exact(c, h + 1, 1, never)) break;
+        bool fin = h[0] & 0x80;
+        uint8_t op = h[0] & 0x0f;
+        bool masked = h[1] & 0x80;
+        uint64_t len = h[1] & 0x7f;
+        if (len == 126) { uint8_t e[2]; if (!recv_exact(c, e, 2, never)) break; len = (uint64_t)e[0] << 8 | e[1]; }
+        else if (len == 127) { uint8_t e[8]; if (!recv_exact(c, e, 8, never)) break; len = 0; for (int i = 0; i < 8; ++i) len = len << 8 | e[i]; }
+        if (len > (1u << 22)) break;
+        uint8_t mask[4] = {0, 0, 0, 0};
+        if (masked && !recv_exact(c, mask, 4, never)) break;
+        std::string payload((size_t)len, '\0');
+        if (len && !recv_exact(c, payload.data(), (size_t)len, never)) break;
+        if (masked) for (size_t i = 0; i < payload.size(); ++i) payload[i] ^= mask[i & 3];
+        if (op == 8) { send_frame(c, 8, std::string()); break; }
+        if (op == 9) { if (!send_frame(c, 10, payload)) break; continue; }
+        if (op == 10) continue;
+        if (op == 0) message += payload; else { message = payload; message_op = op; }
+        if (!fin) continue;
+        if (message_op == 1) handle_message(message);
+        else if (message_op == 2 && message.size() >= 8) {
+            size_t frames = message.size() / 8;
+            rs.push(reinterpret_cast<const float *>(message.data()), frames, g_client_rate);
+            g_frames_in += frames;
+        }
+        message.clear();
+    }
+    g_client_connected = false;
+    std::lock_guard<std::mutex> lock(g_mu);
+    g_count = 0;
+}
+
+void net_thread(int port, std::vector<std::string> extra_origins) {
+    SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons((u_short)port);
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);          // this machine only
+    BOOL yes = TRUE;
+    setsockopt(ls, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&yes, sizeof(yes));
+    if (bind(ls, (sockaddr *)&a, sizeof(a)) != 0 || listen(ls, 4) != 0) {
+        set_status("Port " + std::to_string(port) + " is taken - is the app already running?");
+        return;
+    }
+    DWORD to = 300;
+    setsockopt(ls, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof(to));
+    std::vector<std::thread> clients;
+    std::atomic<SOCKET> current{INVALID_SOCKET};
+    while (!g_quit) {
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(ls, &fds);
+        timeval tv{0, 300000};
+        if (select(0, &fds, nullptr, nullptr, &tv) <= 0) continue;
+        SOCKET c = accept(ls, nullptr, nullptr);
+        if (c == INVALID_SOCKET) continue;
+        SOCKET old = current.exchange(c);                   // a new page replaces the old connection
+        if (old != INVALID_SOCKET) shutdown(old, SD_BOTH);
+        clients.emplace_back([c, &extra_origins, &current] {
+            serve_client(c, extra_origins);
+            SOCKET expect = c;
+            current.compare_exchange_strong(expect, INVALID_SOCKET);
+            closesocket(c);
+        });
+        // forget finished threads lazily: keep the list short
+        if (clients.size() > 16) { for (auto &t : clients) if (t.joinable()) t.join(); clients.clear(); }
+    }
+    SOCKET cur = current.exchange(INVALID_SOCKET);
+    if (cur != INVALID_SOCKET) shutdown(cur, SD_BOTH);
+    for (auto &t : clients) if (t.joinable()) t.join();
+    closesocket(ls);
+}
+
+// ---------------------------------------------------------------- Windows Spatial Sound
+struct Bed {
+    AudioObjectType type;
+    int src;            // 0 L, 1 R, 2 mid
+    bool ear;           // ear-level (else a height speaker)
+};
+const Bed kBeds[] = {
+    {AudioObjectType_FrontLeft, 0, true},  {AudioObjectType_FrontRight, 1, true},
+    {AudioObjectType_FrontCenter, 2, true},
+    {AudioObjectType_SideLeft, 0, true},   {AudioObjectType_SideRight, 1, true},
+    {AudioObjectType_BackLeft, 0, true},   {AudioObjectType_BackRight, 1, true},
+    {AudioObjectType_TopFrontLeft, 0, false}, {AudioObjectType_TopFrontRight, 1, false},
+    {AudioObjectType_TopBackLeft, 0, false},  {AudioObjectType_TopBackRight, 1, false},
+};
+
+std::string bed_label(unsigned mask) {
+    bool side = mask & (AudioObjectType_SideLeft | AudioObjectType_SideRight);
+    bool back = mask & (AudioObjectType_BackLeft | AudioObjectType_BackRight);
+    int tops = 0;
+    for (auto t : {AudioObjectType_TopFrontLeft, AudioObjectType_TopFrontRight, AudioObjectType_TopBackLeft, AudioObjectType_TopBackRight})
+        if (mask & t) ++tops;
+    std::string s = (side && back) ? "7.1" : (side || back) ? "5.1" : "2.1";
+    if (tops) s += "." + std::to_string(tops);
+    return s;
+}
+
+// One activation of the spatial stream on the default output; returns when it fails or on quit.
+// Returns false if the device offers no spatial audio at all (the caller waits and retries).
+bool run_spatial_once() {
+    HRESULT hr = S_OK;
+    ComPtr<IMMDeviceEnumerator> en;
+    ComPtr<IMMDevice> dev;
+    ComPtr<ISpatialAudioClient> client;
+    ComPtr<ISpatialAudioObjectRenderStream> stream;
+    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&en));
+    if (SUCCEEDED(hr)) hr = en->GetDefaultAudioEndpoint(eRender, eMultimedia, &dev);
+    if (SUCCEEDED(hr)) hr = dev->Activate(__uuidof(ISpatialAudioClient), CLSCTX_INPROC_SERVER, nullptr, reinterpret_cast<void **>(client.GetAddressOf()));
+    if (FAILED(hr)) { set_status("The default output has no Windows Spatial Sound"); return false; }
+    AudioObjectType native = AudioObjectType_None;
+    hr = client->GetNativeStaticObjectTypeMask(&native);
+    if (FAILED(hr)) return false;
+    std::string name = "default output";
+    {
+        ComPtr<IPropertyStore> ps;
+        if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &ps))) {
+            PROPVARIANT v{};
+            if (SUCCEEDED(ps->GetValue(PKEY_Device_FriendlyName, &v)) && v.vt == VT_LPWSTR) {
+                char u[512]{};
+                WideCharToMultiByte(CP_UTF8, 0, v.pwszVal, -1, u, sizeof(u), nullptr, nullptr);
+                name = u;
+            }
+            PropVariantClear(&v);
+        }
+    }
+    WAVEFORMATEX fmt{};
+    fmt.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    fmt.nChannels = 1;
+    fmt.nSamplesPerSec = kOutRate;
+    fmt.wBitsPerSample = 32;
+    fmt.nBlockAlign = 4;
+    fmt.nAvgBytesPerSec = kOutRate * 4;
+    if (FAILED(client->IsAudioObjectFormatSupported(&fmt))) return false;
+    unsigned want = 0;
+    for (const Bed &b : kBeds) if (native & b.type) want |= b.type;
+    if (!(want & (AudioObjectType_FrontLeft | AudioObjectType_FrontRight))) { set_status("This output has no front speakers in Spatial Sound"); return false; }
+    HANDLE ev = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    SpatialAudioObjectRenderStreamActivationParams p{};
+    p.ObjectFormat = &fmt;
+    p.StaticObjectTypeMask = static_cast<AudioObjectType>(want);
+    p.MinDynamicObjectCount = 0;
+    p.MaxDynamicObjectCount = 0;
+    p.Category = AudioCategory_Media;
+    p.EventHandle = ev;
+    PROPVARIANT act{};
+    act.vt = VT_BLOB;
+    act.blob.cbSize = sizeof(p);
+    act.blob.pBlobData = reinterpret_cast<BYTE *>(&p);
+    hr = client->ActivateSpatialAudioStream(&act, __uuidof(ISpatialAudioObjectRenderStream), reinterpret_cast<void **>(stream.GetAddressOf()));
+    if (SUCCEEDED(hr)) hr = stream->Start();
+    if (FAILED(hr)) { CloseHandle(ev); set_status("Spatial Sound did not start (is it switched on for this device in Windows Sound settings?)"); return false; }
+
+    std::vector<ComPtr<ISpatialAudioObject>> objs(sizeof(kBeds) / sizeof(kBeds[0]));
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        g_device = name;
+        g_bed = bed_label(want);
+        g_has_heights = (want & (AudioObjectType_TopFrontLeft | AudioObjectType_TopFrontRight | AudioObjectType_TopBackLeft | AudioObjectType_TopBackRight)) != 0;
+        g_spatial_ok = true;
+        g_status = "Playing through " + name + " (" + g_bed + ")";
+    }
+    g_info_version++;
+    bool primed = false;
+    std::vector<float> l, r;
+    while (!g_quit) {
+        if (WaitForSingleObject(ev, 300) != WAIT_OBJECT_0) {
+            if (g_quit) break;
+            hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+            break;
+        }
+        UINT32 avail = 0, frames = 0;
+        hr = stream->BeginUpdatingAudioObjects(&avail, &frames);
+        if (FAILED(hr)) break;
+        l.assign(frames, 0.0f);
+        r.assign(frames, 0.0f);
+        size_t got = ring_pull(l.data(), r.data(), frames, primed);
+        (void)got;
+        const bool all = g_set.all, heights = g_set.heights;
+        for (size_t i = 0; i < objs.size() && SUCCEEDED(hr); ++i) {
+            const Bed &b = kBeds[i];
+            if (!(want & b.type)) continue;
+            if (!objs[i]) hr = stream->ActivateSpatialAudioObject(b.type, &objs[i]);
+            if (FAILED(hr)) break;
+            BYTE *buf = nullptr;
+            UINT32 bytes = 0;
+            hr = objs[i]->GetBuffer(&buf, &bytes);
+            if (FAILED(hr)) break;
+            float *out = reinterpret_cast<float *>(buf);
+            UINT32 n = std::min<UINT32>(frames, bytes / 4);
+            const bool front = b.type == AudioObjectType_FrontLeft || b.type == AudioObjectType_FrontRight;
+            const bool active = front || (all && (b.ear || heights));
+            if (!active) { std::fill(out, out + n, 0.0f); continue; }
+            for (UINT32 f = 0; f < n; ++f) out[f] = b.src == 0 ? l[f] : b.src == 1 ? r[f] : 0.5f * (l[f] + r[f]);
+        }
+        HRESULT end = stream->EndUpdatingAudioObjects();
+        if (SUCCEEDED(hr)) hr = end;
+        if (FAILED(hr)) break;
+    }
+    stream->Stop();
+    stream->Reset();
+    CloseHandle(ev);
+    {
+        std::lock_guard<std::mutex> lock(g_mu);
+        g_spatial_ok = false;
+    }
+    g_info_version++;
+    if (!g_quit) set_status("Audio device changed or lost - reconnecting");
+    return true;
+}
+
+void audio_thread() {
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    while (!g_quit) {
+        if (g_null) {                                        // test mode: drain and measure
+            {
+                std::lock_guard<std::mutex> lock(g_mu);
+                g_spatial_ok = true;
+                g_device = "null";
+                g_bed = "7.1.4";
+                g_has_heights = true;
+                g_status = "Test mode (no audio output)";
+            }
+            g_info_version++;
+            bool primed = false;
+            std::vector<float> l(480), r(480);
+            double acc = 0;
+            uint64_t last_in = 0;
+            DWORD t0 = GetTickCount();
+            while (!g_quit) {
+                Sleep(10);
+                size_t got = ring_pull(l.data(), r.data(), 480, primed);
+                for (size_t i = 0; i < got; ++i) acc += (double)l[i] * l[i];
+                if (GetTickCount() - t0 >= 1000) {
+                    std::FILE *lg = nullptr;
+                    fopen_s(&lg, "ksf-null.log", "a");
+                    if (lg) std::fprintf(lg, "in=%llu frames/s  rms(L)=%.4f  underruns=%llu  client=%d  all=%d heights=%d\n",
+                                (unsigned long long)(g_frames_in - last_in), std::sqrt(acc / kOutRate),
+                                (unsigned long long)g_underruns.load(), g_client_connected.load() ? 1 : 0,
+                                g_set.all.load() ? 1 : 0, g_set.heights.load() ? 1 : 0);
+                    if (lg) std::fclose(lg);
+                    acc = 0; last_in = g_frames_in; t0 = GetTickCount();
+                }
+            }
+            break;
+        }
+        bool ran = run_spatial_once();
+        if (!ran) {
+            { std::lock_guard<std::mutex> lock(g_mu); g_spatial_ok = false; }
+            g_info_version++;
+        }
+        for (int i = 0; i < 20 && !g_quit; ++i) Sleep(100);   // retry every 2 s (a device may appear)
+    }
+    CoUninitialize();
+}
+
+// ---------------------------------------------------------------- tray icon
+constexpr UINT WM_TRAY = WM_USER + 1;
+constexpr UINT ID_QUIT = 1, ID_AUTOSTART = 2;
+const wchar_t *kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const wchar_t *kRunName = L"KSF Spatial Bridge";
+
+bool autostart_on() {
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &k) != ERROR_SUCCESS) return false;
+    bool on = RegQueryValueExW(k, kRunName, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS;
+    RegCloseKey(k);
+    return on;
+}
+
+void set_autostart(bool on) {
+    HKEY k;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_WRITE, &k) != ERROR_SUCCESS) return;
+    if (on) {
+        wchar_t path[MAX_PATH];
+        GetModuleFileNameW(nullptr, path, MAX_PATH);
+        std::wstring v = L"\"" + std::wstring(path) + L"\"";
+        RegSetValueExW(k, kRunName, 0, REG_SZ, (const BYTE *)v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
+    } else RegDeleteValueW(k, kRunName);
+    RegCloseKey(k);
+}
+
+LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_TRAY && (l == WM_RBUTTONUP || l == WM_LBUTTONUP)) {
+        std::string st;
+        { std::lock_guard<std::mutex> lock(g_mu); st = g_status; }
+        std::wstring ws(st.begin(), st.end());
+        HMENU menu = CreatePopupMenu();
+        AppendMenuW(menu, MF_STRING | MF_DISABLED, 0, (L"KSF Spatial Bridge: " + ws).c_str());
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (autostart_on() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
+        AppendMenuW(menu, MF_STRING, ID_QUIT, L"Quit");
+        POINT pt;
+        GetCursorPos(&pt);
+        SetForegroundWindow(h);
+        UINT cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, nullptr);
+        DestroyMenu(menu);
+        if (cmd == ID_QUIT) { g_quit = true; PostQuitMessage(0); }
+        else if (cmd == ID_AUTOSTART) set_autostart(!autostart_on());
+        return 0;
+    }
+    if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
+    return DefWindowProcW(h, m, w, l);
+}
+
+}  // namespace
+
+int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
+    std::FILE *fp_ = nullptr;
+    int port = 47321;
+    std::vector<std::string> origins;
+    int argc = 0;
+    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    auto narrow = [](const wchar_t *w) {
+        char b[1024]{};
+        WideCharToMultiByte(CP_UTF8, 0, w, -1, b, sizeof(b), nullptr, nullptr);
+        return std::string(b);
+    };
+    for (int i = 1; i < argc; ++i) {
+        std::wstring a = argv[i];
+        if (a == L"--port" && i + 1 < argc) port = _wtoi(argv[++i]);
+        else if (a == L"--origin" && i + 1 < argc) origins.push_back(narrow(argv[++i]));
+        else if (a == L"--null") g_null = true;
+        else if (a == L"--help") {
+            if (AttachConsole(ATTACH_PARENT_PROCESS)) freopen_s(&fp_, "CONOUT$", "w", stdout);
+            std::printf("ksf-spatial-bridge [--port N] [--origin URL] [--null]\n");
+            return 0;
+        }
+    }
+    if (g_null) {
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) { freopen_s(&fp_, "CONOUT$", "w", stdout); }
+    }
+    // One copy only.
+    HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\KsfSpatialBridge");
+    if (GetLastError() == ERROR_ALREADY_EXISTS && !g_null) return 0;
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    set_status("Waiting for the music page");
+
+    std::thread net(net_thread, port, origins);
+    std::thread audio(audio_thread);
+
+    if (g_null) {                                           // no tray: run until killed
+        while (!g_quit) Sleep(200);
+    } else {
+        WNDCLASSW wc{};
+        wc.lpfnWndProc = wnd_proc;
+        wc.hInstance = inst;
+        wc.lpszClassName = L"KsfSpatialBridgeWnd";
+        RegisterClassW(&wc);
+        HWND hwnd = CreateWindowW(wc.lpszClassName, L"KSF Spatial Bridge", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, inst, nullptr);
+        NOTIFYICONDATAW nid{};
+        nid.cbSize = sizeof(nid);
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.uCallbackMessage = WM_TRAY;
+        nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        wcscpy_s(nid.szTip, L"KSF Spatial Bridge");
+        Shell_NotifyIconW(NIM_ADD, &nid);
+        MSG msg;
+        while (GetMessageW(&msg, nullptr, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
+        Shell_NotifyIconW(NIM_DELETE, &nid);
+    }
+    g_quit = true;
+    net.join();
+    audio.join();
+    WSACleanup();
+    if (single) CloseHandle(single);
+    return 0;
+}
