@@ -22,7 +22,7 @@ let running = false;
 function hint() {
   const l = sel.value;
   const n = speakersOf(l).length;
-  if (needsBridge(l)) $("hint").textContent = n + " speakers through Windows Spatial Sound. Needs the bridge app running.";
+  if (needsBridge(l)) $("hint").textContent = n + " speakers through Windows Spatial Sound. Needs the bridge app running." + (l.startsWith("9") ? " Untested: the wide speakers have not been tried on real 9.x hardware." : "");
   else if (l.startsWith("9")) $("hint").textContent = "A browser can play at most 7.1, so the two wide speakers are folded into the front. Use 9.0.2 or more with the bridge for real wides.";
   else $("hint").textContent = n + " speakers on the browser's own audio output (set the Windows speaker setup to " + (l.startsWith("5") ? "5.1" : "7.1") + ").";
 }

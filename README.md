@@ -100,3 +100,5 @@ tab, click the icon, pick a layout, press Upmix. The tab's own sound is muted wh
   available. The extension reports the object count the device offers and warns when a layout needs more.
 - The upmix is a plain matrix (centre = common part, surrounds and heights = delayed, filtered
   difference part), see `extension/upmix-worklet.js`.
+- **Untested:** the 9.x layouts (the two wide speakers FWL / FWR, as dynamic objects) have not been verified on
+  real 9.x hardware; 5.x and 7.x on a 7.1.4 device are the tested ground.
