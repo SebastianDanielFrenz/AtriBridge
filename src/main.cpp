@@ -6,7 +6,10 @@
 //
 // Messages from the page (text frames, JSON): {"type":"hello"|"mode","rate":44100,
 // "mode":"all"|"stereo","heights":true|false}. Binary frames are interleaved float32 stereo at
-// "rate". The app answers {"type":"info","device":...,"bed":"7.1.4","heights":true} once Windows
+// "rate". The browser extension instead sends {"type":"hello","rate":48000,"speakers":"FL,FR,FC,SL,SR,TFL,TFR"}:
+// the binary frames then carry one channel per listed speaker (names FL FR FC SL SR BL BR FWL FWR TFL TFR
+// TML TMR TBL TBR, up to 16) and each channel plays on its own speaker, as a static bed object where
+// Windows offers one, else as a dynamic (positioned) object, else folded into the nearest bed speaker. The app answers {"type":"info","device":...,"bed":"7.1.4","heights":true} once Windows
 // Spatial Sound works on the default output, and {"type":"gone"} when it stops working.
 //
 // "all" plays every ear-level speaker at the same level (the left-side speakers get L, the right
@@ -55,6 +58,39 @@ constexpr size_t kMaxQueued = kOutRate / 4;       // above 250 ms: drop to the t
 constexpr size_t kTargetQueued = kOutRate / 10;   // 100 ms
 constexpr size_t kPrime = kOutRate * 6 / 100;     // start playing once 60 ms are queued
 
+// ---------------------------------------------------------------- speakers
+constexpr int kMaxCh = 16;
+constexpr int kMaxDyn = 16;
+enum Spk { S_FL, S_FR, S_FC, S_SL, S_SR, S_BL, S_BR, S_FWL, S_FWR, S_TFL, S_TFR, S_TML, S_TMR, S_TBL, S_TBR, S_COUNT };
+struct SpkInfo {
+    const char *name;
+    AudioObjectType st;     // the static bed object Windows has for it (None: only as a dynamic object)
+    float az, el;           // degrees: azimuth (+ right of front), elevation, for a dynamic object
+    int fold[3];            // where its channel goes when it gets neither (first static one present); -1 ends
+};
+const SpkInfo kSpk[S_COUNT] = {
+    {"FL", AudioObjectType_FrontLeft, -30, 0, {-1, -1, -1}},
+    {"FR", AudioObjectType_FrontRight, 30, 0, {-1, -1, -1}},
+    {"FC", AudioObjectType_FrontCenter, 0, 0, {S_FL, -1, -1}},
+    {"SL", AudioObjectType_SideLeft, -90, 0, {S_BL, S_FL, -1}},
+    {"SR", AudioObjectType_SideRight, 90, 0, {S_BR, S_FR, -1}},
+    {"BL", AudioObjectType_BackLeft, -150, 0, {S_SL, S_FL, -1}},
+    {"BR", AudioObjectType_BackRight, 150, 0, {S_SR, S_FR, -1}},
+    {"FWL", AudioObjectType_None, -60, 0, {S_FL, -1, -1}},
+    {"FWR", AudioObjectType_None, 60, 0, {S_FR, -1, -1}},
+    {"TFL", AudioObjectType_TopFrontLeft, -45, 45, {S_FL, -1, -1}},
+    {"TFR", AudioObjectType_TopFrontRight, 45, 45, {S_FR, -1, -1}},
+    {"TML", AudioObjectType_None, -90, 50, {S_TFL, S_TBL, S_FL}},
+    {"TMR", AudioObjectType_None, 90, 50, {S_TFR, S_TBR, S_FR}},
+    {"TBL", AudioObjectType_TopBackLeft, -135, 45, {S_TFL, S_BL, S_FL}},
+    {"TBR", AudioObjectType_TopBackRight, 135, 45, {S_TFR, S_BR, S_FR}},
+};
+
+int speaker_index(const std::string &name) {
+    for (int i = 0; i < S_COUNT; ++i) if (name == kSpk[i].name) return i;
+    return -1;
+}
+
 // ---------------------------------------------------------------- state shared by the threads
 struct Settings {
     std::atomic<bool> all{true};
@@ -63,7 +99,7 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
-constexpr const char *kVersion = "1.1.1";      // must equal --version given to tools/publish.py for this build
+constexpr const char *kVersion = "1.2.0";      // must equal --version given to tools/publish.py for this build
 // Where updates come from when nothing else is configured. Replace with your own server or GitHub repository
 // (--update-url / --update-github / spatial-bridge.conf).
 constexpr const char *kDefaultUpdateSource = "https://media-dl.ksfhost.de/api/public/spatial-bridge/latest.json";
@@ -94,8 +130,12 @@ std::atomic<int> g_client_rate{kOutRate};
 std::atomic<bool> g_client_connected{false};
 
 std::mutex g_mu;                       // ring, status text
-std::vector<float> g_ring(kRingFrames * 2, 0.0f);
+std::vector<float> g_ring(kRingFrames * kMaxCh, 0.0f);   // frames of g_ring_ch channels, kMaxCh apart
 size_t g_rd = 0, g_count = 0;          // read index (frames), queued frames
+int g_ring_ch = 2;                     // channels per frame of what is queued
+std::vector<int> g_layout;             // speaker per channel; empty = the page's stereo ("all"/"stereo" modes)
+std::atomic<int> g_layout_version{0};
+int g_dyn_max = 0, g_static_n = 0;     // what the device offers (for the info message)
 std::string g_status = "Starting";
 std::string g_device;
 std::string g_bed;
@@ -202,39 +242,43 @@ std::string json_escape(const std::string &s) {
 }
 
 // ---------------------------------------------------------------- the ring and the resampler
-// Input arrives at the page's rate; the ring holds 48 kHz stereo. Linear interpolation, streaming:
-// `inbuf` keeps the not-yet-consumed input frames, `pos` is the fractional read position in it.
+// Input arrives at the client's rate; the ring holds 48 kHz frames of `nch` channels. Linear interpolation,
+// streaming: `inbuf` keeps the not-yet-consumed input frames, `pos` is the fractional read position in it.
 struct Resampler {
     std::vector<float> inbuf;
     double pos = 0.0;
+    int nch = 2;
     void reset() { inbuf.clear(); pos = 0.0; }
     void push(const float *frames, size_t n, int rate) {
         std::lock_guard<std::mutex> lock(g_mu);
-        auto put = [](float l, float r) {
+        if (nch != g_ring_ch) return;                    // frames of a layout that is no longer the ring's
+        auto put = [&](const float *fr) {
             if (g_count >= kRingFrames) return;
             size_t w = (g_rd + g_count) % kRingFrames;
-            g_ring[w * 2] = l; g_ring[w * 2 + 1] = r;
+            for (int c = 0; c < nch; ++c) g_ring[w * kMaxCh + c] = fr[c];
             ++g_count;
         };
         if (rate == kOutRate) {
-            for (size_t i = 0; i < n; ++i) put(frames[i * 2], frames[i * 2 + 1]);
+            for (size_t i = 0; i < n; ++i) put(frames + i * nch);
         } else {
-            inbuf.insert(inbuf.end(), frames, frames + n * 2);
+            inbuf.insert(inbuf.end(), frames, frames + n * nch);
             const double step = (double)rate / kOutRate;
-            const size_t have = inbuf.size() / 2;
+            const size_t have = inbuf.size() / nch;
+            float tmp[kMaxCh];
             while (pos + 1.0 < (double)have) {
                 size_t i = (size_t)pos;
                 float f = (float)(pos - (double)i);
-                put(inbuf[i * 2] + (inbuf[i * 2 + 2] - inbuf[i * 2]) * f, inbuf[i * 2 + 1] + (inbuf[i * 2 + 3] - inbuf[i * 2 + 1]) * f);
+                for (int c = 0; c < nch; ++c) tmp[c] = inbuf[i * nch + c] + (inbuf[(i + 1) * nch + c] - inbuf[i * nch + c]) * f;
+                put(tmp);
                 pos += step;
             }
             size_t drop = (size_t)pos;
             if (drop > 0) {
-                inbuf.erase(inbuf.begin(), inbuf.begin() + (std::ptrdiff_t)(drop * 2));
+                inbuf.erase(inbuf.begin(), inbuf.begin() + (std::ptrdiff_t)(drop * nch));
                 pos -= (double)drop;
             }
         }
-        if (g_count > kMaxQueued) {                      // the page's clock runs faster: skip ahead
+        if (g_count > kMaxQueued) {                      // the client's clock runs faster: skip ahead
             size_t cut = g_count - kTargetQueued;
             g_rd = (g_rd + cut) % kRingFrames;
             g_count -= cut;
@@ -242,15 +286,18 @@ struct Resampler {
     }
 };
 
-// Pulls up to `frames` from the ring into planar l/r; returns how many it got.
-size_t ring_pull(float *l, float *r, size_t frames, bool &primed) {
+// Pulls up to `frames` interleaved frames of `nch` channels into `out` (zero beyond what it got); returns how
+// many it got. A ring that holds another channel count (a client just changed layout) yields nothing.
+size_t ring_pull(float *out, int nch, size_t frames, bool &primed) {
     std::lock_guard<std::mutex> lock(g_mu);
+    std::fill(out, out + frames * (size_t)nch, 0.0f);
+    if (nch != g_ring_ch) return 0;
     if (!primed && g_count >= kPrime) primed = true;
     if (!primed) return 0;
     size_t got = std::min(frames, g_count);
     for (size_t i = 0; i < got; ++i) {
         size_t k = (g_rd + i) % kRingFrames;
-        l[i] = g_ring[k * 2]; r[i] = g_ring[k * 2 + 1];
+        for (int c = 0; c < nch; ++c) out[i * nch + c] = g_ring[k * kMaxCh + c];
     }
     g_rd = (g_rd + got) % kRingFrames;
     g_count -= got;
@@ -263,6 +310,9 @@ bool origin_allowed(const std::string &origin, const std::vector<std::string> &e
     if (origin.empty()) return true;                       // not a browser
     static const char *ok[] = {"https://media-dl.ksfhost.de", "https://music.ksfhost.de", "http://localhost", "http://127.0.0.1", "https://localhost"};
     for (const char *o : ok) if (origin.rfind(o, 0) == 0) return true;
+    // The browser extension connects from its own origin (the id differs per install and browser). A web page
+    // cannot present one, so only an installed extension can.
+    if (origin.rfind("chrome-extension://", 0) == 0 || origin.rfind("moz-extension://", 0) == 0) return true;
     for (const auto &o : extra) if (origin == o) return true;
     return false;
 }
@@ -300,11 +350,35 @@ bool recv_exact(SOCKET s, void *d, size_t n, const std::atomic<bool> &stop) {
 
 std::string info_json() {
     std::lock_guard<std::mutex> lock(g_mu);
-    return "{\"type\":\"info\",\"version\":\"" + std::string(kVersion) + "\",\"device\":\"" + json_escape(g_device) + "\",\"bed\":\"" + g_bed + "\",\"heights\":" + (g_has_heights ? "true" : "false") + "}";
+    return "{\"type\":\"info\",\"version\":\"" + std::string(kVersion) + "\",\"device\":\"" + json_escape(g_device) + "\",\"bed\":\"" + g_bed + "\",\"heights\":" + (g_has_heights ? "true" : "false") +
+           ",\"objects\":" + std::to_string(g_static_n + g_dyn_max) + ",\"dynamic\":" + std::to_string(g_dyn_max) + "}";
 }
 
-void handle_message(const std::string &text) {
+// Returns the channel count the following binary frames carry (2 unless a layout was announced).
+void handle_message(const std::string &text, int &nch) {
     std::string type = json_str(text, "type");
+    std::string speakers = json_str(text, "speakers");
+    if (type == "hello" || !speakers.empty()) {
+        std::vector<int> layout;
+        size_t p = 0;
+        while (!speakers.empty() && p <= speakers.size() && (int)layout.size() < kMaxCh) {
+            size_t e = speakers.find(',', p);
+            std::string name = speakers.substr(p, e == std::string::npos ? std::string::npos : e - p);
+            int idx = speaker_index(name);
+            if (idx < 0) { layout.clear(); break; }
+            layout.push_back(idx);
+            if (e == std::string::npos) break;
+            p = e + 1;
+        }
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (layout != g_layout || (layout.empty() ? 2 : (int)layout.size()) != g_ring_ch) {
+            g_layout = layout;
+            g_ring_ch = layout.empty() ? 2 : (int)layout.size();
+            g_count = 0;
+            g_layout_version++;
+        }
+        nch = g_ring_ch;
+    }
     std::string rate = json_str(text, "rate");
     if (!rate.empty()) {
         int r = std::atoi(rate.c_str());
@@ -314,7 +388,6 @@ void handle_message(const std::string &text) {
     if (!mode.empty()) g_set.all = mode != "stereo";
     std::string hg = json_str(text, "heights");
     if (!hg.empty()) g_set.heights = hg == "true";
-    (void)type;
 }
 
 void serve_client(SOCKET c, const std::vector<std::string> &extra_origins) {
@@ -353,9 +426,12 @@ void serve_client(SOCKET c, const std::vector<std::string> &extra_origins) {
     if (!send_all(c, resp.data(), (int)resp.size())) return;
     g_client_connected = true;
     Resampler rs;
+    int nch = 2;
     {
         std::lock_guard<std::mutex> lock(g_mu);
         g_count = 0;
+        g_ring_ch = 2;
+        if (!g_layout.empty()) { g_layout.clear(); g_layout_version++; }
     }
     int announced = -1;
     std::string message;
@@ -392,9 +468,9 @@ void serve_client(SOCKET c, const std::vector<std::string> &extra_origins) {
         if (op == 10) continue;
         if (op == 0) message += payload; else { message = payload; message_op = op; }
         if (!fin) continue;
-        if (message_op == 1) handle_message(message);
-        else if (message_op == 2 && message.size() >= 8) {
-            size_t frames = message.size() / 8;
+        if (message_op == 1) { handle_message(message, nch); rs.nch = nch; rs.reset(); }
+        else if (message_op == 2 && message.size() >= 4 * (size_t)nch) {
+            size_t frames = message.size() / (4 * (size_t)nch);
             rs.push(reinterpret_cast<const float *>(message.data()), frames, g_client_rate);
             g_frames_in += frames;
         }
@@ -448,19 +524,55 @@ void net_thread(int port, std::vector<std::string> extra_origins) {
 }
 
 // ---------------------------------------------------------------- Windows Spatial Sound
-struct Bed {
-    AudioObjectType type;
-    int src;            // 0 L, 1 R, 2 mid
-    bool ear;           // ear-level (else a height speaker)
+// What each object plays: a weighted sum of input channels.
+struct Route {
+    int n = 0;
+    int ch[6]{};
+    float g[6]{};
+    void add(int c, float gain) { if (n < 6) { ch[n] = c; g[n] = gain; ++n; } }
 };
-const Bed kBeds[] = {
-    {AudioObjectType_FrontLeft, 0, true},  {AudioObjectType_FrontRight, 1, true},
-    {AudioObjectType_FrontCenter, 2, true},
-    {AudioObjectType_SideLeft, 0, true},   {AudioObjectType_SideRight, 1, true},
-    {AudioObjectType_BackLeft, 0, true},   {AudioObjectType_BackRight, 1, true},
-    {AudioObjectType_TopFrontLeft, 0, false}, {AudioObjectType_TopFrontRight, 1, false},
-    {AudioObjectType_TopBackLeft, 0, false},  {AudioObjectType_TopBackRight, 1, false},
+
+struct Plan {
+    Route st[S_COUNT];              // static bed objects, by speaker
+    Route dyn[kMaxDyn];             // dynamic objects
+    int dyn_spk[kMaxDyn]{};
+    int ndyn = 0;
+    int nch = 2;
 };
+
+// layout empty: the music page's stereo ("all": every ear-level speaker gets its side, heights optional).
+void build_plan(Plan &p, unsigned native, int max_dyn, const std::vector<int> &layout, bool all, bool heights) {
+    p = Plan();
+    auto has = [&](int s) { return kSpk[s].st != AudioObjectType_None && (native & kSpk[s].st) != 0; };
+    if (layout.empty()) {
+        p.nch = 2;
+        for (int s = 0; s < S_COUNT; ++s) {
+            if (!has(s)) continue;
+            const bool left = s == S_FL || s == S_SL || s == S_BL || s == S_TFL || s == S_TBL;
+            const bool height = s == S_TFL || s == S_TFR || s == S_TBL || s == S_TBR;
+            const bool front = s == S_FL || s == S_FR;
+            if (!(front || (all && (!height || heights)))) continue;
+            if (s == S_FC) { p.st[s].add(0, 0.5f); p.st[s].add(1, 0.5f); }
+            else p.st[s].add(left ? 0 : 1, 1.0f);
+        }
+        return;
+    }
+    p.nch = (int)layout.size();
+    for (int c = 0; c < p.nch; ++c) {
+        const int s = layout[c];
+        if (has(s)) { p.st[s].add(c, 1.0f); continue; }
+        if (p.ndyn < max_dyn) { p.dyn[p.ndyn].add(c, 1.0f); p.dyn_spk[p.ndyn++] = s; continue; }
+        for (int t : kSpk[s].fold) if (t >= 0 && has(t)) { p.st[t].add(c, 1.0f); break; }
+    }
+}
+
+void mix_route(const Route &r, const float *in, int nch, UINT32 frames, float *out) {
+    for (UINT32 f = 0; f < frames; ++f) {
+        float v = 0.0f;
+        for (int k = 0; k < r.n; ++k) v += in[(size_t)f * nch + r.ch[k]] * r.g[k];
+        out[f] = v;
+    }
+}
 
 std::string bed_label(unsigned mask) {
     bool side = mask & (AudioObjectType_SideLeft | AudioObjectType_SideRight);
@@ -510,36 +622,53 @@ bool run_spatial_once() {
     fmt.nAvgBytesPerSec = kOutRate * 4;
     if (FAILED(client->IsAudioObjectFormatSupported(&fmt))) return false;
     unsigned want = 0;
-    for (const Bed &b : kBeds) if (native & b.type) want |= b.type;
+    int static_n = 0;
+    for (const SpkInfo &b : kSpk) if (b.st != AudioObjectType_None && (native & b.st)) { want |= b.st; ++static_n; }
     if (!(want & (AudioObjectType_FrontLeft | AudioObjectType_FrontRight))) { set_status("This output has no front speakers in Spatial Sound"); return false; }
     HANDLE ev = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     SpatialAudioObjectRenderStreamActivationParams p{};
     p.ObjectFormat = &fmt;
     p.StaticObjectTypeMask = static_cast<AudioObjectType>(want);
-    p.MinDynamicObjectCount = 0;
-    p.MaxDynamicObjectCount = 0;
-    p.Category = AudioCategory_Media;
-    p.EventHandle = ev;
-    PROPVARIANT act{};
-    act.vt = VT_BLOB;
-    act.blob.cbSize = sizeof(p);
-    act.blob.pBlobData = reinterpret_cast<BYTE *>(&p);
-    hr = client->ActivateSpatialAudioStream(&act, __uuidof(ISpatialAudioObjectRenderStream), reinterpret_cast<void **>(stream.GetAddressOf()));
+    UINT32 max_dyn = 0;
+    if (SUCCEEDED(client->GetMaxDynamicObjectCount(&max_dyn))) max_dyn = std::min<UINT32>(max_dyn, kMaxDyn);
+    else max_dyn = 0;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        p.MinDynamicObjectCount = 0;
+        p.MaxDynamicObjectCount = max_dyn;
+        p.Category = AudioCategory_Media;
+        p.EventHandle = ev;
+        PROPVARIANT act{};
+        act.vt = VT_BLOB;
+        act.blob.cbSize = sizeof(p);
+        act.blob.pBlobData = reinterpret_cast<BYTE *>(&p);
+        stream.Reset();
+        hr = client->ActivateSpatialAudioStream(&act, __uuidof(ISpatialAudioObjectRenderStream), reinterpret_cast<void **>(stream.GetAddressOf()));
+        if (FAILED(hr) && max_dyn > 0) { max_dyn = 0; continue; }       // no dynamic objects: statics only
+        break;
+    }
     if (SUCCEEDED(hr)) hr = stream->Start();
     if (FAILED(hr)) { CloseHandle(ev); set_status("Spatial Sound did not start (is it switched on for this device in Windows Sound settings?)"); return false; }
 
-    std::vector<ComPtr<ISpatialAudioObject>> objs(sizeof(kBeds) / sizeof(kBeds[0]));
+    ComPtr<ISpatialAudioObject> st_objs[S_COUNT];
+    ComPtr<ISpatialAudioObject> dyn_objs[kMaxDyn];
+    int dyn_last_spk[kMaxDyn];
+    for (int &v : dyn_last_spk) v = -1;
     {
         std::lock_guard<std::mutex> lock(g_mu);
         g_device = name;
         g_bed = bed_label(want);
         g_has_heights = (want & (AudioObjectType_TopFrontLeft | AudioObjectType_TopFrontRight | AudioObjectType_TopBackLeft | AudioObjectType_TopBackRight)) != 0;
         g_spatial_ok = true;
+        g_dyn_max = (int)max_dyn;
+        g_static_n = static_n;
         g_status = "Playing through " + name + " (" + g_bed + ")";
     }
     g_info_version++;
     bool primed = false;
-    std::vector<float> l, r;
+    std::vector<float> in;
+    Plan plan;
+    int plan_version = -1;
+    bool plan_all = true, plan_heights = false;
     while (!g_quit) {
         if (WaitForSingleObject(ev, 300) != WAIT_OBJECT_0) {
             if (g_quit) break;
@@ -549,26 +678,51 @@ bool run_spatial_once() {
         UINT32 avail = 0, frames = 0;
         hr = stream->BeginUpdatingAudioObjects(&avail, &frames);
         if (FAILED(hr)) break;
-        l.assign(frames, 0.0f);
-        r.assign(frames, 0.0f);
-        size_t got = ring_pull(l.data(), r.data(), frames, primed);
-        (void)got;
         const bool all = g_set.all, heights = g_set.heights;
-        for (size_t i = 0; i < objs.size() && SUCCEEDED(hr); ++i) {
-            const Bed &b = kBeds[i];
-            if (!(want & b.type)) continue;
-            if (!objs[i]) hr = stream->ActivateSpatialAudioObject(b.type, &objs[i]);
+        const int ver = g_layout_version;
+        if (ver != plan_version || all != plan_all || heights != plan_heights) {
+            std::vector<int> layout;
+            { std::lock_guard<std::mutex> lock(g_mu); layout = g_layout; }
+            build_plan(plan, want, (int)max_dyn, layout, all, heights);
+            plan_version = ver; plan_all = all; plan_heights = heights;
+        }
+        in.assign((size_t)frames * plan.nch, 0.0f);
+        ring_pull(in.data(), plan.nch, frames, primed);
+        for (int si = 0; si < S_COUNT && SUCCEEDED(hr); ++si) {
+            const SpkInfo &b = kSpk[si];
+            if (b.st == AudioObjectType_None || !(want & b.st)) continue;
+            if (!st_objs[si]) hr = stream->ActivateSpatialAudioObject(b.st, &st_objs[si]);
             if (FAILED(hr)) break;
             BYTE *buf = nullptr;
             UINT32 bytes = 0;
-            hr = objs[i]->GetBuffer(&buf, &bytes);
+            hr = st_objs[si]->GetBuffer(&buf, &bytes);
             if (FAILED(hr)) break;
             float *out = reinterpret_cast<float *>(buf);
             UINT32 n = std::min<UINT32>(frames, bytes / 4);
-            const bool front = b.type == AudioObjectType_FrontLeft || b.type == AudioObjectType_FrontRight;
-            const bool active = front || (all && (b.ear || heights));
-            if (!active) { std::fill(out, out + n, 0.0f); continue; }
-            for (UINT32 f = 0; f < n; ++f) out[f] = b.src == 0 ? l[f] : b.src == 1 ? r[f] : 0.5f * (l[f] + r[f]);
+            mix_route(plan.st[si], in.data(), plan.nch, n, out);
+        }
+        for (int di = 0; di < (int)max_dyn && SUCCEEDED(hr); ++di) {
+            const bool used = di < plan.ndyn;
+            if (!dyn_objs[di]) {
+                if (!used) continue;
+                HRESULT ha = stream->ActivateSpatialAudioObject(AudioObjectType_Dynamic, &dyn_objs[di]);
+                if (FAILED(ha)) { dyn_objs[di].Reset(); continue; }      // fewer objects than reported: that channel is dropped
+            }
+            BYTE *buf = nullptr;
+            UINT32 bytes = 0;
+            HRESULT hb = dyn_objs[di]->GetBuffer(&buf, &bytes);
+            if (FAILED(hb)) { hr = hb; break; }
+            float *out = reinterpret_cast<float *>(buf);
+            UINT32 n = std::min<UINT32>(frames, bytes / 4);
+            if (!used) { std::fill(out, out + n, 0.0f); continue; }
+            if (dyn_last_spk[di] != plan.dyn_spk[di]) {
+                const SpkInfo &sp = kSpk[plan.dyn_spk[di]];
+                const float r = 2.0f, az = sp.az * 0.01745329252f, el = sp.el * 0.01745329252f;
+                dyn_objs[di]->SetPosition(r * std::cos(el) * std::sin(az), r * std::sin(el), -r * std::cos(el) * std::cos(az));
+                dyn_objs[di]->SetVolume(1.0f);
+                dyn_last_spk[di] = plan.dyn_spk[di];
+            }
+            mix_route(plan.dyn[di], in.data(), plan.nch, n, out);
         }
         HRESULT end = stream->EndUpdatingAudioObjects();
         if (SUCCEEDED(hr)) hr = end;
@@ -597,18 +751,22 @@ void audio_thread() {
                 g_device = "null";
                 g_bed = "7.1.4";
                 g_has_heights = true;
+                g_dyn_max = 12;
+                g_static_n = 11;
                 g_status = "Test mode (no audio output)";
             }
             g_info_version++;
             bool primed = false;
-            std::vector<float> l(480), r(480);
+            std::vector<float> in(480 * kMaxCh);
             double acc = 0;
             uint64_t last_in = 0;
             DWORD t0 = GetTickCount();
             while (!g_quit) {
                 Sleep(10);
-                size_t got = ring_pull(l.data(), r.data(), 480, primed);
-                for (size_t i = 0; i < got; ++i) acc += (double)l[i] * l[i];
+                int nch;
+                { std::lock_guard<std::mutex> lock(g_mu); nch = g_ring_ch; }
+                size_t got = ring_pull(in.data(), nch, 480, primed);
+                for (size_t i = 0; i < got; ++i) acc += (double)in[i * nch] * in[i * nch];
                 if (GetTickCount() - t0 >= 1000) {
                     std::FILE *lg = nullptr;
                     fopen_s(&lg, "ksf-null.log", "a");

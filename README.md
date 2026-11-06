@@ -80,3 +80,23 @@ back to "Audio", then to plain time-critical thread priority) and the network th
 heavy load from a game or a render does not make the sound crackle. `--normal-priority` turns that off.
 
 MIT licence.
+
+## Browser extension: upmix YouTube, YouTube Music, any tab
+
+`extension/` is a Chrome / Edge (MV3, version 116+) extension that captures the audio of the current tab and
+upmixes it to 5.0, 7.0 or 9.0, or with the bridge to 5.0.2 ... 9.0.6 (`.2` = TFL TFR, `.4` adds TBL TBR,
+`.6` = TFL TFR TML TMR TBL TBR; 9.0 adds two wide speakers, 7.0 adds back speakers, no LFE anywhere).
+Load it unpacked (`chrome://extensions`, Developer mode, Load unpacked, pick `extension/`), open the
+tab, click the icon, pick a layout, press Upmix. The tab's own sound is muted while captured.
+
+- **Without the bridge** (5.0, 7.0, 9.0): the upmix goes to the browser's own output as discrete channels,
+  so Windows has to be set to 5.1 / 7.1 for the output. A browser plays 8 channels at most, so 9.0 is folded
+  to 7.0 (the wides go into the front pair); use 9.0.2 or more with the bridge for real wides.
+- **With the bridge** (anything with `.2/.4/.6`): the extension sends one channel per speaker to
+  `ws://127.0.0.1:47321` (`{"type":"hello","rate":48000,"speakers":"FL,FR,..."}`, then interleaved float32
+  frames). The bridge plays each as a static Spatial Sound bed object where Windows has one (FL FR FC SL SR
+  BL BR TFL TFR TBL TBR), as a positioned dynamic object where it has none (FWL FWR TML TMR; needs the
+  device to offer dynamic objects), and folds a speaker into the nearest bed speaker when neither is
+  available. The extension reports the object count the device offers and warns when a layout needs more.
+- The upmix is a plain matrix (centre = common part, surrounds and heights = delayed, filtered
+  difference part), see `extension/upmix-worklet.js`.

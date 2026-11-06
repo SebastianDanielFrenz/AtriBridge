@@ -2,6 +2,8 @@
    python tools/ws_test.py [port]  - prints the app's replies; watch the app's console for rms/underruns."""
 import base64, math, os, socket, struct, sys, time, json
 port = int(sys.argv[1]) if len(sys.argv) > 1 else 47321
+speakers = sys.argv[2] if len(sys.argv) > 2 else ""   # e.g. FL,FR,FC,SL,SR,TFL,TFR: one channel per speaker
+nch = len(speakers.split(",")) if speakers else 2
 s = socket.create_connection(("127.0.0.1", port))
 key = base64.b64encode(os.urandom(16)).decode()
 s.sendall((f"GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
@@ -29,7 +31,7 @@ def read_frame():
     if n == 126: n = struct.unpack(">H", s.recv(2))[0]
     return h[0] & 15, s.recv(n)
 
-s.sendall(frame(1, json.dumps({"type": "hello", "rate": 44100, "mode": "all", "heights": False}).encode()))
+s.sendall(frame(1, json.dumps({"type": "hello", "rate": 44100, "mode": "all", "heights": False, **({"speakers": speakers} if speakers else {})}).encode()))
 s.settimeout(2)
 print("reply:", read_frame())
 rate, t = 44100, 0
@@ -39,7 +41,7 @@ while time.time() - start < 3:
     blk = bytearray()
     for i in range(1024):
         v = 0.5 * math.sin(2 * math.pi * 440 * (t + i) / rate)
-        blk += struct.pack("<ff", v, 0.0)
+        blk += struct.pack("<" + "f" * nch, v, *([0.0] * (nch - 1)))
     t += 1024; sent += 1024
     s.sendall(frame(2, bytes(blk)))
     due = start + sent / rate
