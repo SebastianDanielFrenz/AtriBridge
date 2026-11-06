@@ -41,6 +41,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -99,7 +101,7 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
-constexpr const char *kVersion = "1.2.1";      // must equal --version given to tools/publish.py for this build
+constexpr const char *kVersion = "1.2.2";      // must equal --version given to tools/publish.py for this build
 // Where updates come from when nothing else is configured. Replace with your own server or GitHub repository
 // (--update-url / --update-github / spatial-bridge.conf).
 constexpr const char *kDefaultUpdateSource = "https://media-dl.ksfhost.de/api/public/spatial-bridge/latest.json";
@@ -417,7 +419,7 @@ void handle_message(const std::string &text, int &nch) {
     }
 }
 
-void serve_client(SOCKET c, const std::vector<std::string> &extra_origins) {
+void serve_client(SOCKET c, const std::vector<std::string> &extra_origins, const std::function<bool()> &still_current) {
     DWORD to = 500;
     setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof(to));
     BOOL nodelay = TRUE;
@@ -503,6 +505,8 @@ void serve_client(SOCKET c, const std::vector<std::string> &extra_origins) {
         }
         message.clear();
     }
+    // A replaced connection ends AFTER the new one has started: its teardown must not clear the new one's state.
+    if (!still_current()) return;
     g_client_connected = false;
     std::lock_guard<std::mutex> lock(g_mu);
     g_count = 0;
@@ -523,7 +527,12 @@ void net_thread(int port, std::vector<std::string> extra_origins) {
     }
     DWORD to = 300;
     setsockopt(ls, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof(to));
-    std::vector<std::thread> clients;
+    // One entry per connection; `done` is set by the thread itself when it has finished, so finished ones can be
+    // joined without waiting for a live one. (Until 1.2.1 more than 16 entries joined EVERY thread, the live
+    // connection's included: the accept loop then blocked for good - the app took TCP connections into the
+    // listen queue but never answered a handshake again, until it was restarted.)
+    struct Client { std::thread t; std::shared_ptr<std::atomic<bool>> done; };
+    std::vector<Client> clients;
     std::atomic<SOCKET> current{INVALID_SOCKET};
     while (!g_quit) {
         fd_set fds;
@@ -535,18 +544,23 @@ void net_thread(int port, std::vector<std::string> extra_origins) {
         if (c == INVALID_SOCKET) continue;
         SOCKET old = current.exchange(c);                   // a new page replaces the old connection
         if (old != INVALID_SOCKET) shutdown(old, SD_BOTH);
-        clients.emplace_back([c, &extra_origins, &current] {
-            serve_client(c, extra_origins);
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        clients.push_back({std::thread([c, done, &extra_origins, &current] {
+            serve_client(c, extra_origins, [&current, c] { return current.load() == c; });
             SOCKET expect = c;
             current.compare_exchange_strong(expect, INVALID_SOCKET);
             closesocket(c);
-        });
-        // forget finished threads lazily: keep the list short
-        if (clients.size() > 16) { for (auto &t : clients) if (t.joinable()) t.join(); clients.clear(); }
+            *done = true;
+        }), done});
+        // join the finished threads only; a live one is never waited for
+        for (size_t i = 0; i < clients.size();) {
+            if (clients[i].done->load()) { if (clients[i].t.joinable()) clients[i].t.join(); clients.erase(clients.begin() + (std::ptrdiff_t)i); }
+            else ++i;
+        }
     }
     SOCKET cur = current.exchange(INVALID_SOCKET);
     if (cur != INVALID_SOCKET) shutdown(cur, SD_BOTH);
-    for (auto &t : clients) if (t.joinable()) t.join();
+    for (auto &cl : clients) if (cl.t.joinable()) cl.t.join();
     closesocket(ls);
 }
 
