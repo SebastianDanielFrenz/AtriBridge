@@ -99,7 +99,7 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
-constexpr const char *kVersion = "1.2.0";      // must equal --version given to tools/publish.py for this build
+constexpr const char *kVersion = "1.2.1";      // must equal --version given to tools/publish.py for this build
 // Where updates come from when nothing else is configured. Replace with your own server or GitHub repository
 // (--update-url / --update-github / spatial-bridge.conf).
 constexpr const char *kDefaultUpdateSource = "https://media-dl.ksfhost.de/api/public/spatial-bridge/latest.json";
@@ -132,6 +132,13 @@ std::atomic<bool> g_client_connected{false};
 std::mutex g_mu;                       // ring, status text
 std::vector<float> g_ring(kRingFrames * kMaxCh, 0.0f);   // frames of g_ring_ch channels, kMaxCh apart
 size_t g_rd = 0, g_count = 0;          // read index (frames), queued frames
+// Running totals of frames put into / taken out of the ring, and a mode change that waits for the audio it
+// belongs to. A page fades its output to silence, THEN sends a mode/heights change; the ring still holds up to
+// ~100 ms of audio from before that fade. Applying the change at once mixed that loud old audio into the new
+// layout - a burst of "strongly increased volume" when switching stereo -> 7.1.4. So the change is applied
+// when the read position reaches the write position of the moment the message arrived (or the ring is empty).
+uint64_t g_wr_total = 0, g_rd_total = 0;
+struct PendingSettings { bool has = false; int all = -1; int heights = -1; uint64_t at = 0; } g_pend;
 int g_ring_ch = 2;                     // channels per frame of what is queued
 std::vector<int> g_layout;             // speaker per channel; empty = the page's stereo ("all"/"stereo" modes)
 std::atomic<int> g_layout_version{0};
@@ -257,6 +264,7 @@ struct Resampler {
             size_t w = (g_rd + g_count) % kRingFrames;
             for (int c = 0; c < nch; ++c) g_ring[w * kMaxCh + c] = fr[c];
             ++g_count;
+            ++g_wr_total;
         };
         if (rate == kOutRate) {
             for (size_t i = 0; i < n; ++i) put(frames + i * nch);
@@ -282,6 +290,7 @@ struct Resampler {
             size_t cut = g_count - kTargetQueued;
             g_rd = (g_rd + cut) % kRingFrames;
             g_count -= cut;
+            g_rd_total += cut;
         }
     }
 };
@@ -291,6 +300,11 @@ struct Resampler {
 size_t ring_pull(float *out, int nch, size_t frames, bool &primed) {
     std::lock_guard<std::mutex> lock(g_mu);
     std::fill(out, out + frames * (size_t)nch, 0.0f);
+    if (g_pend.has && (g_count == 0 || g_rd_total >= g_pend.at)) {      // the audio the change belongs to has played
+        if (g_pend.all >= 0) g_set.all = g_pend.all != 0;
+        if (g_pend.heights >= 0) g_set.heights = g_pend.heights != 0;
+        g_pend = PendingSettings();
+    }
     if (nch != g_ring_ch) return 0;
     if (!primed && g_count >= kPrime) primed = true;
     if (!primed) return 0;
@@ -301,6 +315,7 @@ size_t ring_pull(float *out, int nch, size_t frames, bool &primed) {
     }
     g_rd = (g_rd + got) % kRingFrames;
     g_count -= got;
+    g_rd_total += got;
     if (got < frames) { primed = false; g_underruns++; }
     return got;
 }
@@ -375,6 +390,7 @@ void handle_message(const std::string &text, int &nch) {
             g_layout = layout;
             g_ring_ch = layout.empty() ? 2 : (int)layout.size();
             g_count = 0;
+            g_rd_total = g_wr_total;
             g_layout_version++;
         }
         nch = g_ring_ch;
@@ -385,9 +401,20 @@ void handle_message(const std::string &text, int &nch) {
         if (r >= 8000 && r <= 192000) g_client_rate = r;
     }
     std::string mode = json_str(text, "mode");
-    if (!mode.empty()) g_set.all = mode != "stereo";
     std::string hg = json_str(text, "heights");
-    if (!hg.empty()) g_set.heights = hg == "true";
+    if (!mode.empty() || !hg.empty()) {
+        std::lock_guard<std::mutex> lock(g_mu);
+        if (g_count == 0) {                              // nothing queued: nothing old to wait for
+            if (!mode.empty()) g_set.all = mode != "stereo";
+            if (!hg.empty()) g_set.heights = hg == "true";
+            g_pend = PendingSettings();
+        } else {
+            if (!mode.empty()) g_pend.all = mode != "stereo" ? 1 : 0;
+            if (!hg.empty()) g_pend.heights = hg == "true" ? 1 : 0;
+            g_pend.has = true;
+            g_pend.at = g_wr_total;
+        }
+    }
 }
 
 void serve_client(SOCKET c, const std::vector<std::string> &extra_origins) {
