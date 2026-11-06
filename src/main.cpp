@@ -838,6 +838,15 @@ void update_thread() {
 // ---------------------------------------------------------------- tray icon
 constexpr UINT WM_TRAY = WM_USER + 1;
 constexpr UINT ID_QUIT = 1, ID_AUTOSTART = 2, ID_UPDATE = 3;
+// At login the app can start before Explorer has a taskbar: the first Shell_NotifyIcon then fails and the app
+// would run without an icon. Retry until it is accepted, and add it again whenever Explorer restarts.
+UINT g_taskbar_created = 0;
+NOTIFYICONDATAW g_nid{};
+bool g_icon_on = false;
+constexpr UINT_PTR kIconTimer = 77;
+void add_tray_icon() {
+    g_icon_on = Shell_NotifyIconW(NIM_ADD, &g_nid) != FALSE;
+}
 const wchar_t *kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const wchar_t *kRunName = L"KSF Spatial Bridge";
 
@@ -880,6 +889,12 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (cmd == ID_QUIT) { g_quit = true; PostQuitMessage(0); }
         else if (cmd == ID_AUTOSTART) set_autostart(!autostart_on());
         else if (cmd == ID_UPDATE) { set_status("Checking for updates"); SetEvent(g_update_now); }
+        return 0;
+    }
+    if (g_taskbar_created && m == g_taskbar_created) { add_tray_icon(); return 0; }      // Explorer (re)started
+    if (m == WM_TIMER && w == kIconTimer) {
+        if (!g_icon_on) add_tray_icon();
+        if (g_icon_on) KillTimer(h, kIconTimer);
         return 0;
     }
     if (m == WM_APP_QUIT) { PostQuitMessage(0); return 0; }
@@ -969,8 +984,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         wc.hInstance = inst;
         wc.lpszClassName = L"KsfSpatialBridgeWnd";
         RegisterClassW(&wc);
-        HWND hwnd = g_hwnd = CreateWindowW(wc.lpszClassName, L"KSF Spatial Bridge", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, inst, nullptr);
-        NOTIFYICONDATAW nid{};
+        HWND hwnd = g_hwnd = CreateWindowW(wc.lpszClassName, L"KSF Spatial Bridge", 0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);   // a hidden top-level window: a message-only one is not sent the "TaskbarCreated" broadcast
+        NOTIFYICONDATAW &nid = g_nid;
         nid.cbSize = sizeof(nid);
         nid.hWnd = hwnd;
         nid.uID = 1;
@@ -978,7 +993,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         nid.uCallbackMessage = WM_TRAY;
         nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
         wcscpy_s(nid.szTip, L"KSF Spatial Bridge");
-        Shell_NotifyIconW(NIM_ADD, &nid);
+        g_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
+        add_tray_icon();
+        if (!g_icon_on) SetTimer(hwnd, kIconTimer, 2000, nullptr);   // taskbar not there yet (autostart at login)
         MSG msg;
         while (GetMessageW(&msg, nullptr, 0, 0) > 0) { TranslateMessage(&msg); DispatchMessageW(&msg); }
         Shell_NotifyIconW(NIM_DELETE, &nid);
