@@ -7,11 +7,17 @@
   let enabled = true;
   chrome.storage.local.get("pauseOthers").then((r) => { enabled = r.pauseOthers !== false; }).catch(() => {});
   chrome.storage.onChanged.addListener((c) => { if (c.pauseOthers) enabled = c.pauseOthers.newValue !== false; });
-  document.addEventListener("playing", (e) => {
+  function onPlaying(e) {
     const el = e.target;
     if (!enabled || !(el instanceof HTMLMediaElement) || el.muted || el.volume === 0) return;
-    chrome.runtime.sendMessage({ type: "ksf-playing" }).catch(() => {});
-  }, true);
+    // After the extension is reloaded or updated this copy of the script stays in the open tab with a dead connection
+    // (sendMessage then throws "Extension context invalidated"): it quietly stops until the tab is reloaded.
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) { document.removeEventListener("playing", onPlaying, true); return; }
+      chrome.runtime.sendMessage({ type: "ksf-playing" }).catch(() => {});
+    } catch (err) { document.removeEventListener("playing", onPlaying, true); }
+  }
+  document.addEventListener("playing", onPlaying, true);
   chrome.runtime.onMessage.addListener((m) => {
     if (m.type !== "ksf-pause" || !enabled) return;
     for (const el of document.querySelectorAll("audio, video")) if (!el.paused && !el.muted) el.pause();
