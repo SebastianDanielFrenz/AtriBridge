@@ -81,7 +81,7 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
   try { host = new URL(sender.tab.url).host; } catch (e) { /* no url */ }
   chrome.storage.local.set({ lastPlaying: { host, t: Date.now() } }).catch(() => {});
   chrome.tabs.query({}).then((tabs) => {
-    for (const t of tabs) if (t.id !== sender.tab.id) chrome.tabs.sendMessage(t.id, { type: "ksf-pause" }).catch(() => {});
+    for (const t of tabs) if (t.id !== sender.tab.id) chrome.tabs.sendMessage(t.id, { type: "ksf-pause", from: host }).catch(() => {});
   });
 });
 
