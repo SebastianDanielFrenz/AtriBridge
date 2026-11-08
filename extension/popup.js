@@ -53,8 +53,38 @@ function hint() {
   else $("hint").textContent = n + " speakers on the browser's own audio output (set the Windows speaker setup to " + (l.startsWith("5") ? "5.1" : "7.1") + ").";
 }
 
+// The tab's own upmix (the site rule runs it in the page, inpage.js): what that content script reports, or null
+let pageSt = null;
+function renderPage() {
+  const p = pageSt;
+  if (!p || !p.rule) return;
+  const active = !p.suspended && p.built > 0;
+  let line;
+  if (p.suspended) line = "Stopped on this tab (reload the tab to start it again)";
+  else if (!p.built) line = "Always " + p.rule + " on this site: starts when something plays";
+  else {
+    line = "Upmixing as " + p.rule + " (in the page)";
+    if (p.bridge) {
+      if (p.blocked) line += " - the bridge is used by another page, press play here to take it back";
+      else if (p.ctxRunning === false) line += " - waiting for a click on the page (the browser blocks the audio until then)";
+      else if (p.live) line += " - bridge connected";
+      else line += " - connecting to the bridge...";
+    }
+  }
+  $("state").textContent = line;
+  $("go").textContent = active ? "Stop" : "Upmix this tab";
+  $("go").classList.toggle("stop", active);
+}
+async function refreshPage() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  pageSt = tab ? await chrome.tabs.sendMessage(tab.id, { type: "ksf-inpage-status" }).catch(() => null) : null;
+  if (!running) { $("go").textContent = "Upmix this tab"; $("go").classList.remove("stop"); if (capErr) $("state").textContent = capErr; else { $("state").textContent = "Not running"; renderPage(); } }
+}
+let capErr = "";
+
 function show(st) {
   running = !!st && st.state === "running";
+  capErr = st && st.error ? "Could not start: " + st.error : "";
   $("go").textContent = running ? "Stop" : "Upmix this tab";
   $("go").classList.toggle("stop", running);
   let line = running ? "Upmixing as " + st.layout : "Not running";
@@ -67,6 +97,7 @@ function show(st) {
   }
   if (st && st.error) line = "Could not start: " + st.error;
   $("state").textContent = line;
+  if (!running && !capErr) renderPage();
   const w = [st && st.note, st && st.warn].filter(Boolean).join(" ");
   $("warn").hidden = !w;
   $("warn").textContent = w;
@@ -81,6 +112,8 @@ async function init() {
   hint();
   $("pauseOthers").checked = (await chrome.storage.local.get("pauseOthers")).pauseOthers !== false;
   show(await chrome.runtime.sendMessage({ cmd: "status" }).catch(() => ({ state: "idle" })));
+  await refreshPage();
+  setInterval(refreshPage, 1000);
 }
 
 let userPicked = 0;
@@ -103,6 +136,13 @@ $("go").addEventListener("click", async () => {
     return;
   }
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  // a site with a rule upmixes in the page: the button stops it / starts it again (no capture needed)
+  if (pageSt && pageSt.rule && (pageSt.suspended || pageSt.built > 0)) {
+    await chrome.tabs.sendMessage(tab.id, { type: "ksf-inpage", suspended: !pageSt.suspended }).catch(() => {});
+    await new Promise((r) => setTimeout(r, 150));
+    await refreshPage();
+    return;
+  }
   await chrome.storage.local.set({ layout: sel.value });
   const r = await chrome.runtime.sendMessage({ cmd: "start", tabId: tab.id, layout: sel.value });
   if (!r || !r.ok) show({ state: "idle", error: r && r.error });

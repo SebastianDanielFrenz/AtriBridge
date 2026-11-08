@@ -185,6 +185,29 @@
   document.addEventListener("playing", onPlay, true);
   document.addEventListener("play", onPlay, true);
 
+  // A page that autoplays on load gets an AudioContext that stays suspended (so the routed element is silent) until the
+  // user has interacted with it: the first click or key resumes every one.
+  const resumeAll = () => { for (const e of live) if (e.ctx.state !== "running") e.ctx.resume().catch(() => {}); };
+  for (const ev of ["pointerdown", "keydown"]) window.addEventListener(ev, resumeAll, true);
+
+  // What the popup shows for this tab: is the page's own audio going through the upmix, and where is the bridge.
+  function statusNow() {
+    const built = [...live].filter((e) => e.node);
+    const playing = built.filter((e) => !e.el.paused);
+    const src = playing.length ? playing : built;
+    const bridge = !!cfg.layout && layouts().needsBridge(cfg.layout);
+    return {
+      rule: cfg.layout, suspended, bridge, built: built.length, playing: playing.length,
+      ctxRunning: src.length ? src.some((e) => e.ctx.state === "running") : null,
+      live: src.some((e) => e.route && e.route.live),
+      blocked: src.some((e) => e.route && e.route.blocked),
+      how: src.length ? src[0].how : "",
+    };
+  }
+  chrome.runtime.onMessage.addListener((m, _sender, reply) => {
+    if (m.type !== "ksf-inpage-status") return;
+    reply(statusNow());
+  });
   chrome.runtime.onMessage.addListener((m) => {
     if (m.type !== "ksf-inpage") return;
     suspended = !!m.suspended;
