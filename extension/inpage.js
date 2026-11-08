@@ -11,6 +11,7 @@
   const entries = new WeakMap();                 // element -> entry
   const live = new Set();                        // entries, to rebuild them when the saved layout changes
   let cfg = { layout: null, style: "equal" };
+  let owner = null;                              // the entry that holds the bridge: one per page (YouTube has several media elements)
   let suspended = false;                         // the tab is under capture: this route stays out of the way
   const layouts = () => globalThis.KsfLayouts;     // layouts.js is the first content script
 
@@ -31,9 +32,10 @@
     let port = null, closeT = 0;
     const r = {
       live: false,
+      blocked: false,                                  // the bridge was taken from this route: it stays out until the element is paused once
       async open() {
         clearTimeout(closeT);
-        if (port || r.opening) return;
+        if (port || r.opening || r.blocked) return;
         r.opening = true;
         // the offscreen page that holds the socket may not exist yet
         try { await chrome.runtime.sendMessage({ type: "ksf-ensure-offscreen" }); } catch (err) { r.opening = false; return; }
@@ -46,7 +48,10 @@
         port.onMessage.addListener((m) => {
           if (port !== mine) return;
           if (m.t === "info") { r.live = true; e.setBridge(true); }
-          else if (m.t === "gone" || m.t === "closed" || m.t === "replaced") { r.live = false; e.setBridge(false); if (m.t === "replaced") r.drop(); }
+          else if (m.t === "gone" || m.t === "closed" || m.t === "replaced") {
+            r.live = false; e.setBridge(false);
+            if (m.t === "replaced") { r.blocked = true; r.drop(); if (owner === e) owner = null; }    // not taken back by itself: that was the fight
+          }
         });
         port.onDisconnect.addListener(() => { if (port === mine) { port = null; r.live = false; e.setBridge(false); } });
         port.postMessage({ t: "open", rate: e.ctx.sampleRate, speakers: e.speakers.join(",") });
@@ -142,10 +147,19 @@
     };
     entries.set(el, e);
     live.add(e);
-    const wake = () => { if (ctx.state !== "running") ctx.resume().catch(() => {}); if (e.route) e.route.open(); };
+    const wake = () => {
+      if (ctx.state !== "running") ctx.resume().catch(() => {});
+      if (!e.route) return;
+      // another element of this page is playing through the bridge: it keeps it (two routes took it from each other,
+      // half a second of sound and a second of silence)
+      if (owner && owner !== e && !owner.el.paused && !owner.el.muted && owner.route) return;
+      owner = e;
+      e.route.open();
+    };
     el.addEventListener("playing", wake);
     el.addEventListener("play", wake);
-    for (const ev of ["pause", "ended", "emptied"]) el.addEventListener(ev, () => { if (e.route) e.route.closeSoon(); });
+    for (const ev of ["pause", "ended"]) el.addEventListener(ev, () => { if (e.route) { e.route.blocked = false; e.route.closeSoon(); } if (owner === e) owner = null; });
+    el.addEventListener("emptied", () => { if (e.route) e.route.closeSoon(); });
     try {
       await build(e);
       wake();
