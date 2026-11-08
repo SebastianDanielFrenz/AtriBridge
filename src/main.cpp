@@ -41,6 +41,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -101,7 +102,7 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
-constexpr const char *kVersion = "1.2.2";      // must equal --version given to tools/publish.py for this build
+constexpr const char *kVersion = "1.2.3";      // must equal --version given to tools/publish.py for this build
 // Where updates come from when nothing else is configured. Replace with your own server or GitHub repository
 // (--update-url / --update-github / spatial-bridge.conf).
 constexpr const char *kDefaultUpdateSource = "https://media-dl.ksfhost.de/api/public/spatial-bridge/latest.json";
@@ -151,6 +152,13 @@ std::string g_bed;
 bool g_has_heights = false;
 bool g_spatial_ok = false;
 std::atomic<uint64_t> g_frames_in{0}, g_underruns{0};
+// Timing counters for the "stats" message the page logs (music page diagnostics): the longest gap between two
+// audio blocks from the page, between two pulls of the audio engine, and how many of each were late, since the
+// last stats message. A gap on the page side means the page (or the connection) delivered late; a gap on the
+// engine side means Windows called late; an underrun with neither means the queue simply ran dry.
+std::atomic<uint32_t> g_recv_gap_max_ms{0}, g_pull_gap_max_ms{0}, g_recv_late{0}, g_pull_late{0};
+std::atomic<uint64_t> g_pulls{0}, g_recv_blocks{0};
+static void note_max(std::atomic<uint32_t> &m, uint32_t v) { uint32_t o = m.load(); while (v > o && !m.compare_exchange_weak(o, v)) {} }
 
 // info changes the net thread must announce
 std::atomic<int> g_info_version{0};
@@ -158,6 +166,70 @@ std::atomic<int> g_info_version{0};
 void set_status(const std::string &s) {
     std::lock_guard<std::mutex> lock(g_mu);
     g_status = s;
+}
+
+// ---------------------------------------------------------------- the playback log (opt-in)
+// OFF at the start of every program session - on only after the tray menu's "Log playback problems" or --log -
+// so it never fills a disk by itself. Events only (an underrun, a late block, a connection, a mode change) plus a
+// heartbeat every 30 s, and whatever the music page sends while it is on (its own diagnostics: gaps on the page's
+// side), so both sides share one timeline. %LOCALAPPDATA%\KsfSpatialBridge\bridge.log, 4 MB, then bridge.1.log.
+// Nothing realtime writes to it: the audio thread only counts, the diagnostics thread below turns counts into lines.
+std::atomic<bool> g_log_on{false};
+std::mutex g_log_mu;
+std::FILE *g_log_fp = nullptr;
+std::wstring g_log_dir;
+// Counters the log owns (the stats message to the page consumes its own copies).
+std::atomic<uint32_t> g_lg_recv_gap_max{0}, g_lg_pull_gap_max{0}, g_lg_recv_late{0}, g_lg_pull_late{0};
+
+std::wstring log_dir() {
+    if (g_log_dir.empty()) {
+        wchar_t b[MAX_PATH]{};
+        DWORD n = ExpandEnvironmentStringsW(L"%LOCALAPPDATA%", b, MAX_PATH);
+        g_log_dir = (n > 0 && n < MAX_PATH ? std::wstring(b) : std::wstring(L".")) + L"\\KsfSpatialBridge";
+        CreateDirectoryW(g_log_dir.c_str(), nullptr);
+    }
+    return g_log_dir;
+}
+
+void blog(const std::string &line) {
+    if (!g_log_on) return;
+    std::lock_guard<std::mutex> lock(g_log_mu);
+    const std::wstring dir = log_dir();
+    const std::wstring path = dir + L"\\bridge.log";
+    if (g_log_fp && std::ftell(g_log_fp) > 4 * 1024 * 1024) {
+        std::fclose(g_log_fp);
+        g_log_fp = nullptr;
+        MoveFileExW(path.c_str(), (dir + L"\\bridge.1.log").c_str(), MOVEFILE_REPLACE_EXISTING);
+    }
+    if (!g_log_fp) {
+        _wfopen_s(&g_log_fp, path.c_str(), L"ab");
+        if (!g_log_fp) return;
+    }
+    SYSTEMTIME t;
+    GetLocalTime(&t);
+    std::fprintf(g_log_fp, "%04d-%02d-%02d %02d:%02d:%02d.%03d %s\n", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, line.c_str());
+    std::fflush(g_log_fp);
+}
+
+std::string log_path_utf8() {
+    const std::wstring w = log_dir() + L"\\bridge.log";
+    char b[1024]{};
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, b, sizeof(b), nullptr, nullptr);
+    return b;
+}
+
+void log_set(bool on, const char *why) {
+    if (on == g_log_on.load()) return;
+    if (on) {
+        g_log_on = true;
+        blog(std::string("---- logging ON (") + why + ") ksf-spatial-bridge " + kVersion + ", file " + log_path_utf8());
+    } else {
+        blog(std::string("---- logging OFF (") + why + ")");
+        g_log_on = false;
+        std::lock_guard<std::mutex> lock(g_log_mu);
+        if (g_log_fp) { std::fclose(g_log_fp); g_log_fp = nullptr; }
+    }
+    g_info_version++;                       // the page learns "logging" from the next info message
 }
 
 // ---------------------------------------------------------------- SHA-1 and base64 (the WebSocket handshake)
@@ -368,7 +440,8 @@ bool recv_exact(SOCKET s, void *d, size_t n, const std::atomic<bool> &stop) {
 std::string info_json() {
     std::lock_guard<std::mutex> lock(g_mu);
     return "{\"type\":\"info\",\"version\":\"" + std::string(kVersion) + "\",\"device\":\"" + json_escape(g_device) + "\",\"bed\":\"" + g_bed + "\",\"heights\":" + (g_has_heights ? "true" : "false") +
-           ",\"objects\":" + std::to_string(g_static_n + g_dyn_max) + ",\"dynamic\":" + std::to_string(g_dyn_max) + "}";
+           ",\"objects\":" + std::to_string(g_static_n + g_dyn_max) + ",\"dynamic\":" + std::to_string(g_dyn_max) +
+           ",\"logging\":" + (g_log_on.load() ? "true" : "false") + "}";
 }
 
 // Returns the channel count the following binary frames carry (2 unless a layout was announced).
@@ -402,8 +475,18 @@ void handle_message(const std::string &text, int &nch) {
         int r = std::atoi(rate.c_str());
         if (r >= 8000 && r <= 192000) g_client_rate = r;
     }
+    if (type == "log") {                                  // a line from the page's own diagnostics, only while logging
+        blog("page: " + json_str(text, "line"));
+        return;
+    }
     std::string mode = json_str(text, "mode");
     std::string hg = json_str(text, "heights");
+    if (g_log_on && (!mode.empty() || !hg.empty())) {
+        size_t q;
+        { std::lock_guard<std::mutex> lock(g_mu); q = g_count; }
+        blog("page asked: mode=" + (mode.empty() ? std::string("-") : mode) + " heights=" + (hg.empty() ? std::string("-") : hg) +
+             " (queued " + std::to_string(q * 1000 / kOutRate) + " ms; applied when that audio has played)");
+    }
     if (!mode.empty() || !hg.empty()) {
         std::lock_guard<std::mutex> lock(g_mu);
         if (g_count == 0) {                              // nothing queued: nothing old to wait for
@@ -454,6 +537,7 @@ void serve_client(SOCKET c, const std::vector<std::string> &extra_origins, const
     std::string resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept_key(key) + "\r\n\r\n";
     if (!send_all(c, resp.data(), (int)resp.size())) return;
     g_client_connected = true;
+    blog("client connected, origin=" + header("Origin"));
     Resampler rs;
     int nch = 2;
     {
@@ -463,6 +547,9 @@ void serve_client(SOCKET c, const std::vector<std::string> &extra_origins, const
         if (!g_layout.empty()) { g_layout.clear(); g_layout_version++; }
     }
     int announced = -1;
+    auto last_stats = std::chrono::steady_clock::now();
+    auto last_block = last_stats;
+    bool had_block = false;
     std::string message;
     uint8_t message_op = 0;
     // The reader must also announce info changes; a short timeout on recv lets it look.
@@ -474,6 +561,23 @@ void serve_client(SOCKET c, const std::vector<std::string> &extra_origins, const
             bool ok;
             { std::lock_guard<std::mutex> lock(g_mu); ok = g_spatial_ok || g_null; }
             if (!send_frame(c, 1, ok ? info_json() : std::string("{\"type\":\"gone\"}"))) break;
+        }
+        {
+            const auto t = std::chrono::steady_clock::now();
+            if (t - last_stats >= std::chrono::seconds(1)) {
+                last_stats = t;
+                size_t queued;
+                { std::lock_guard<std::mutex> lock(g_mu); queued = g_count; }
+                std::string js = "{\"type\":\"stats\",\"queued_ms\":" + std::to_string(queued * 1000 / kOutRate) +
+                    ",\"underruns\":" + std::to_string(g_underruns.load()) +
+                    ",\"recv_blocks\":" + std::to_string(g_recv_blocks.load()) +
+                    ",\"recv_gap_max_ms\":" + std::to_string(g_recv_gap_max_ms.exchange(0)) +
+                    ",\"recv_late\":" + std::to_string(g_recv_late.exchange(0)) +
+                    ",\"pulls\":" + std::to_string(g_pulls.load()) +
+                    ",\"pull_gap_max_ms\":" + std::to_string(g_pull_gap_max_ms.exchange(0)) +
+                    ",\"pull_late\":" + std::to_string(g_pull_late.exchange(0)) + "}";
+                if (!send_frame(c, 1, js)) break;
+            }
         }
         uint8_t h[2];
         int k = recv(c, (char *)h, 1, 0);
@@ -500,13 +604,24 @@ void serve_client(SOCKET c, const std::vector<std::string> &extra_origins, const
         if (message_op == 1) { handle_message(message, nch); rs.nch = nch; rs.reset(); }
         else if (message_op == 2 && message.size() >= 4 * (size_t)nch) {
             size_t frames = message.size() / (4 * (size_t)nch);
+            {
+                const auto t = std::chrono::steady_clock::now();
+                if (had_block) {
+                    const uint32_t gap = (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(t - last_block).count();
+                    note_max(g_recv_gap_max_ms, gap);
+                    note_max(g_lg_recv_gap_max, gap);
+                    if (gap > 100) { g_recv_late++; g_lg_recv_late++; }     // blocks are ~21 ms apart: 100 ms is a dropout of the page
+                }
+                last_block = t; had_block = true; g_recv_blocks++;
+            }
             rs.push(reinterpret_cast<const float *>(message.data()), frames, g_client_rate);
             g_frames_in += frames;
         }
         message.clear();
     }
     // A replaced connection ends AFTER the new one has started: its teardown must not clear the new one's state.
-    if (!still_current()) return;
+    if (!still_current()) { blog("an older client connection ended (replaced by a newer one)"); return; }
+    blog("client disconnected");
     g_client_connected = false;
     std::lock_guard<std::mutex> lock(g_mu);
     g_count = 0;
@@ -717,6 +832,17 @@ bool run_spatial_once() {
             break;
         }
         UINT32 avail = 0, frames = 0;
+        {
+            static thread_local std::chrono::steady_clock::time_point last_pull{};
+            const auto t = std::chrono::steady_clock::now();
+            if (last_pull.time_since_epoch().count() != 0) {
+                const uint32_t gap = (uint32_t)std::chrono::duration_cast<std::chrono::milliseconds>(t - last_pull).count();
+                note_max(g_pull_gap_max_ms, gap);
+                note_max(g_lg_pull_gap_max, gap);
+                if (gap > 40) { g_pull_late++; g_lg_pull_late++; }          // the engine asks every ~10 ms
+            }
+            last_pull = t; g_pulls++;
+        }
         hr = stream->BeginUpdatingAudioObjects(&avail, &frames);
         if (FAILED(hr)) break;
         const bool all = g_set.all, heights = g_set.heights;
@@ -779,6 +905,69 @@ bool run_spatial_once() {
     g_info_version++;
     if (!g_quit) set_status("Audio device changed or lost - reconnecting");
     return true;
+}
+
+// Turns the counters into log lines, only while the log is on (see the playback log above).
+void diagnostics_thread() {
+    uint64_t last_frames = 0, last_under = 0, beat_frames = 0;
+    int last_ver = -1;
+    bool last_client = false, last_all = true, last_h = false, was_on = false;
+    DWORD beat_at = 0;
+    while (!g_quit) {
+        Sleep(500);
+        if (!g_log_on) { was_on = false; continue; }
+        if (!was_on) {                                       // just switched on: start from now, say how things stand
+            was_on = true;
+            last_frames = beat_frames = g_frames_in.load();
+            last_under = g_underruns.load();
+            last_ver = -1;
+            last_client = !g_client_connected.load();
+            last_all = !g_set.all.load();
+            last_h = !g_set.heights.load();
+            beat_at = GetTickCount();
+            g_lg_recv_gap_max = 0; g_lg_pull_gap_max = 0; g_lg_recv_late = 0; g_lg_pull_late = 0;
+        }
+        size_t queued;
+        int channels;
+        std::string status, device, bed;
+        { std::lock_guard<std::mutex> lock(g_mu); queued = g_count; channels = g_ring_ch; status = g_status; device = g_device; bed = g_bed; }
+        const double queued_ms = queued * 1000.0 / kOutRate;
+        char b[512];
+        const int ver = g_info_version.load();
+        if (ver != last_ver) {
+            last_ver = ver;
+            blog("state: " + status + " | device=" + device + " bed=" + bed);
+        }
+        const bool client = g_client_connected.load();
+        if (client != last_client) { last_client = client; blog(std::string("client ") + (client ? "present" : "absent")); }
+        const bool all = g_set.all.load(), heights = g_set.heights.load();
+        if (all != last_all || heights != last_h) {
+            last_all = all; last_h = heights;
+            blog(std::string("output mode now: ") + (all ? "all" : "stereo") + ", heights " + (heights ? "on" : "off"));
+        }
+        const uint64_t under = g_underruns.load();
+        if (under != last_under) {
+            std::snprintf(b, sizeof(b), "UNDERRUN +%llu (total %llu): the queue ran dry, queued now %.0f ms, channels=%d",
+                          (unsigned long long)(under - last_under), (unsigned long long)under, queued_ms, channels);
+            blog(b);
+            last_under = under;
+        }
+        const uint32_t rl = g_lg_recv_late.exchange(0), rg = g_lg_recv_gap_max.exchange(0);
+        if (rl) { std::snprintf(b, sizeof(b), "RECV-LATE x%u: the page's audio blocks arrived up to %u ms apart (normal ~21), queued %.0f ms", rl, rg, queued_ms); blog(b); }
+        const uint32_t pl = g_lg_pull_late.exchange(0), pg = g_lg_pull_gap_max.exchange(0);
+        if (pl) { std::snprintf(b, sizeof(b), "PULL-LATE x%u: Windows called the audio thread up to %u ms apart (normal ~10), queued %.0f ms", pl, pg, queued_ms); blog(b); }
+        const DWORD tick = GetTickCount();
+        if (tick - beat_at >= 30000) {
+            const uint64_t frames = g_frames_in.load();
+            const double secs = (tick - beat_at) / 1000.0;
+            std::snprintf(b, sizeof(b), "ok: in %.0f frames/s, queued %.0f ms, underruns total %llu, client=%d", (frames - beat_frames) / secs, queued_ms,
+                          (unsigned long long)under, client ? 1 : 0);
+            blog(b);
+            beat_frames = frames;
+            beat_at = tick;
+        }
+    }
+    log_set(false, "quit");
 }
 
 void audio_thread() {
@@ -878,7 +1067,7 @@ void update_thread() {
 
 // ---------------------------------------------------------------- tray icon
 constexpr UINT WM_TRAY = WM_USER + 1;
-constexpr UINT ID_QUIT = 1, ID_AUTOSTART = 2, ID_UPDATE = 3;
+constexpr UINT ID_QUIT = 1, ID_AUTOSTART = 2, ID_UPDATE = 3, ID_LOG = 4, ID_LOGDIR = 5;
 // At login the app can start before Explorer has a taskbar: the first Shell_NotifyIcon then fails and the app
 // would run without an icon. Retry until it is accepted, and add it again whenever Explorer restarts.
 UINT g_taskbar_created = 0;
@@ -921,6 +1110,8 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(menu, MF_STRING | (autostart_on() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
         AppendMenuW(menu, MF_STRING, ID_UPDATE, L"Check for updates now");
+        AppendMenuW(menu, MF_STRING | (g_log_on ? MF_CHECKED : 0), ID_LOG, L"Log playback problems (this session only)");
+        AppendMenuW(menu, MF_STRING, ID_LOGDIR, L"Open the log folder");
         AppendMenuW(menu, MF_STRING, ID_QUIT, L"Quit");
         POINT pt;
         GetCursorPos(&pt);
@@ -930,6 +1121,8 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (cmd == ID_QUIT) { g_quit = true; PostQuitMessage(0); }
         else if (cmd == ID_AUTOSTART) set_autostart(!autostart_on());
         else if (cmd == ID_UPDATE) { set_status("Checking for updates"); SetEvent(g_update_now); }
+        else if (cmd == ID_LOG) log_set(!g_log_on, "tray menu");
+        else if (cmd == ID_LOGDIR) ShellExecuteW(nullptr, L"open", log_dir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         return 0;
     }
     if (g_taskbar_created && m == g_taskbar_created) { add_tray_icon(); return 0; }      // Explorer (re)started
@@ -949,6 +1142,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     std::FILE *fp_ = nullptr;
     int port = 47321;
     DWORD after_update_pid = 0;
+    bool want_log = false;
     std::vector<std::string> origins;
     int argc = 0;
     LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -966,10 +1160,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         else if (a == L"--update-url" && i + 1 < argc) g_update_sources.push_back(narrow(argv[++i]));
         else if (a == L"--update-github" && i + 1 < argc) g_update_sources.push_back("https://github.com/" + narrow(argv[++i]) + "/releases/latest/download/latest.json");
         else if (a == L"--no-update") g_auto_update = false;
+        else if (a == L"--log") want_log = true;
         else if (a == L"--after-update" && i + 1 < argc) after_update_pid = (DWORD)_wtoi(argv[++i]);
         else if (a == L"--help") {
             if (AttachConsole(ATTACH_PARENT_PROCESS)) freopen_s(&fp_, "CONOUT$", "w", stdout);
-            std::printf("ksf-spatial-bridge [--port N] [--origin URL] [--null] [--normal-priority] [--update-url URL] [--update-github OWNER/REPO] [--no-update]\n");
+            std::printf("ksf-spatial-bridge [--port N] [--origin URL] [--null] [--normal-priority] [--update-url URL] [--update-github OWNER/REPO] [--no-update] [--log]\n");
             return 0;
         }
     }
@@ -1011,11 +1206,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
     set_status("Waiting for the music page");
+    if (want_log) log_set(true, "--log");
 
     std::thread net(net_thread, port, origins);
     std::thread audio(audio_thread);
     g_update_now = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     std::thread updater(update_thread);
+    std::thread diagnostics(diagnostics_thread);
 
     if (g_null) {                                           // no tray: run until killed
         while (!g_quit) Sleep(200);
@@ -1046,6 +1243,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     net.join();
     audio.join();
     updater.join();
+    diagnostics.join();
     WSACleanup();
     if (single) CloseHandle(single);
     return 0;
