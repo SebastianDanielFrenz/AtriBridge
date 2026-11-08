@@ -24,9 +24,11 @@ async function probeCapabilities() {
 }
 function fillLayouts() {
   sel.textContent = "";
+  // Only the best each route can drive: a smaller layout has no use on a system that can do the larger one.
+  const best = (list) => (list.length ? [list.reduce((x, y) => (speakersOf(y).length > speakersOf(x).length ? y : x))] : []);
   const groups = [
-    ["Browser output (no bridge)", LAYOUTS.filter((l) => !needsBridge(l) && canUse(l))],
-    ["With the KSF Spatial Bridge", LAYOUTS.filter((l) => needsBridge(l) && canUse(l))],
+    ["Browser output (no bridge)", best(LAYOUTS.filter((l) => !needsBridge(l) && canUse(l)))],
+    ["With the KSF Spatial Bridge", best(LAYOUTS.filter((l) => needsBridge(l) && canUse(l)))],
   ];
   for (const [label, list] of groups) {
     if (!list.length) continue;
