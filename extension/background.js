@@ -1,6 +1,9 @@
 // The popup asks for a capture; the capture itself lives in the offscreen document (a service worker has
 // no audio). Chrome mutes a captured tab's own sound: what you hear is the upmix.
 let capturedTab = null;
+// The service worker is stopped after ~30 s idle and forgets its variables; the captured tab survives in session storage.
+const capturedReady = chrome.storage.session.get("capturedTab").then((r) => { if (capturedTab == null && r.capturedTab != null) capturedTab = r.capturedTab; }).catch(() => {});
+function setCaptured(id) { capturedTab = id; chrome.storage.session.set({ capturedTab: id }).catch(() => {}); }
 
 async function ensureOffscreen() {
   if (await chrome.offscreen.hasDocument()) return;
@@ -10,16 +13,20 @@ async function ensureOffscreen() {
 }
 
 async function start(tabId, layout) {
+  await capturedReady;
+  // A tab that is already being captured cannot get a new stream id: let the running capture go first (a restart
+  // from the popup, user 2026-11-08: "changing the layout during an upmix is not possible").
+  if (await chrome.offscreen.hasDocument()) await chrome.runtime.sendMessage({ target: "offscreen", cmd: "stop" }).catch(() => {});
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
   await ensureOffscreen();
   const style = (await chrome.storage.local.get("style")).style || "equal";
   const r = await chrome.runtime.sendMessage({ target: "offscreen", cmd: "start", streamId, layout, style });
-  if (r && r.ok) capturedTab = tabId;
+  if (r && r.ok) setCaptured(tabId);
   return r;
 }
 
 async function stop() {
-  capturedTab = null;
+  setCaptured(null);
   if (await chrome.offscreen.hasDocument()) {
     await chrome.runtime.sendMessage({ target: "offscreen", cmd: "stop" }).catch(() => {});
     await chrome.offscreen.closeDocument().catch(() => {});
@@ -37,8 +44,10 @@ chrome.runtime.onMessage.addListener((m, _sender, reply) => {
     return true;
   }
   if (m.cmd === "restart") {                 // layout or style changed in the popup while a tab is being upmixed
-    if (capturedTab == null) { reply({ ok: false }); return true; }
-    start(capturedTab, m.layout).then(reply, (e) => reply({ ok: false, error: String((e && e.message) || e) }));
+    capturedReady.then(() => {
+      if (capturedTab == null) return reply({ ok: false, error: "no tab is being upmixed" });
+      return start(capturedTab, m.layout).then(reply, (e) => reply({ ok: false, error: String((e && e.message) || e) }));
+    });
     return true;
   }
   if (m.cmd === "status") {
@@ -50,11 +59,14 @@ chrome.runtime.onMessage.addListener((m, _sender, reply) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener((id) => { if (id === capturedTab) stop(); });
+chrome.tabs.onRemoved.addListener(async (id) => { await capturedReady; if (id === capturedTab) stop(); });
 
 // A tab that starts playing pauses every other taking-part tab (the content script of each one acts on it).
 chrome.runtime.onMessage.addListener((m, sender) => {
   if (m.type !== "ksf-playing" || !sender.tab) return;
+  let host = "";
+  try { host = new URL(sender.tab.url).host; } catch (e) { /* no url */ }
+  chrome.storage.local.set({ lastPlaying: { host, t: Date.now() } }).catch(() => {});
   chrome.tabs.query({}).then((tabs) => {
     for (const t of tabs) if (t.id !== sender.tab.id) chrome.tabs.sendMessage(t.id, { type: "ksf-pause" }).catch(() => {});
   });
@@ -67,6 +79,7 @@ chrome.runtime.onMessage.addListener((m, sender) => {
 // of those events restarted the capture (user, 2026-11-08: half a second of sound, 2 s of silence, forever).
 const autoTried = new Map();
 async function autoUpmix(tab) {
+  await capturedReady;
   if (tab.id === capturedTab) return;
   const last = autoTried.get(tab.id) || 0;
   if (Date.now() - last < 15000) return;          // one attempt per tab per 15 s, whatever the result

@@ -59,7 +59,16 @@ async function init() {
 let userPicked = 0;
 sel.addEventListener("change", () => { hint(); userPicked = Date.now(); chrome.storage.local.set({ layout: sel.value }); restartIfRunning(); });
 // Changing the layout or style while a tab is being upmixed restarts the upmix with the new one.
-function restartIfRunning() { if (running) chrome.runtime.sendMessage({ cmd: "restart", layout: sel.value }).catch(() => {}); }
+async function restartIfRunning() {
+  if (!running) return;
+  const r = await chrome.runtime.sendMessage({ cmd: "restart", layout: sel.value }).catch((e) => ({ ok: false, error: String(e) }));
+  if (r && !r.ok) $("state").textContent = "Could not switch: " + (r.error || "unknown");
+}
+// What the pause-other-tabs relay last saw, so a silent site can be told apart from a missing script.
+async function showLastPlaying() {
+  const lp = (await chrome.storage.local.get("lastPlaying")).lastPlaying;
+  $("lastPlaying").textContent = lp ? "Last start seen: " + (lp.host || "?") + ", " + Math.round((Date.now() - lp.t) / 1000) + " s ago." : "No playing tab seen yet (reload the music tab).";
+}
 $("go").addEventListener("click", async () => {
   if (running) {
     await chrome.runtime.sendMessage({ cmd: "stop" });
@@ -126,4 +135,4 @@ async function showRule() {
 }
 chrome.runtime.onMessage.addListener((m) => { if (m.type === "status") show(m.status); });
 $("version").textContent = "v" + chrome.runtime.getManifest().version;
-init().then(showRule);
+init().then(showRule).then(showLastPlaying);
