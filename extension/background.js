@@ -81,6 +81,8 @@ chrome.runtime.onMessage.addListener((m, sender, reply) => {
     return;
   }
   if (m.type !== "ksf-playing" || !sender.tab) return;
+  // the user started the captured tab again: it takes the bridge back (the capture itself is still running)
+  capturedReady.then(() => { if (sender.tab.id === capturedTab) chrome.runtime.sendMessage({ target: "offscreen", cmd: "reclaim" }).catch(() => {}); });
   let host = "";
   try { host = new URL(sender.tab.url).host; } catch (e) { /* no url */ }
   chrome.storage.local.set({ lastPlaying: { host, t: Date.now() } }).catch(() => {});

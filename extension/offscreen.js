@@ -5,7 +5,7 @@ const { speakersOf, needsBridge, DIRECT_ORDER } = globalThis.KsfLayouts;
 const BRIDGE_URL = "ws://127.0.0.1:47321";
 let ctx = null, stream = null, node = null, ws = null, running = false, retry = null;
 let status = { state: "idle" };
-let replaced = false;
+let replaced = false, capSpeakers = null;
 
 
 function setStatus(patch) {
@@ -51,6 +51,7 @@ async function start({ streamId, layout, style }) {
     node.connect(mute).connect(ctx.destination);
     node.port.onmessage = (e) => { if (ws && ws.readyState === 1 && ws.bufferedAmount < (1 << 20)) ws.send(e.data); };
     running = true;
+    capSpeakers = speakers;
     connectBridge(speakers);
   } else {
     ctx.destination.channelCount = speakers.length;
@@ -82,14 +83,15 @@ function connectBridge(speakers) {
     } else if (m.type === "replaced") {          // another page or tab took the app: do not take it back in a loop
       replaced = true;
       chrome.runtime.sendMessage({ type: "ksf-bridge-taken" }).catch(() => {});      // the captured tab pauses
-      setStatus({ bridgeState: "taken", warn: "The bridge is in use by another page. Press Start again to take it back." });
+      setStatus({ bridgeState: "taken", warn: "The bridge is in use by another page. Press play on the tab to take it back." });
     } else if (m.type === "gone") {
       setStatus({ bridgeState: "nospatial", warn: "Turn on Windows Spatial Sound (Dolby Atmos / Windows Sonic) for the default output." });
     }
   };
   ws.onclose = () => {
+    ws = null;
     if (!running || replaced) return;
-    if (openAt) { replaced = true; setStatus({ bridgeState: "taken", warn: "The bridge connection ended. Press Start again to take it back." }); return; }   // it was up: no re-claiming, the user starts it again
+    if (openAt) { replaced = true; chrome.runtime.sendMessage({ type: "ksf-bridge-taken" }).catch(() => {}); setStatus({ bridgeState: "taken", warn: "The bridge connection ended. Press play on the tab to take it back." }); return; }   // it was up: no re-claiming, the user starts it again
     setStatus({ bridgeState: "missing" });
     retry = setTimeout(() => connectBridge(speakers), 2000);
   };
@@ -172,6 +174,9 @@ chrome.runtime.onMessage.addListener((m, _sender, reply) => {
     stop().then(() => reply({ ok: true }));
   } else if (m.cmd === "status") {
     reply(status);
+  } else if (m.cmd === "reclaim") {            // the captured tab was started again by the user: take the bridge back
+    if (running && replaced && capSpeakers && !ws) { replaced = false; openAt = 0; connectBridge(capSpeakers); }
+    reply({ ok: true });
   }
   return true;
 });
