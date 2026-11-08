@@ -8,7 +8,7 @@ function setCaptured(id) { capturedTab = id; chrome.storage.session.set({ captur
 async function ensureOffscreen() {
   if (await chrome.offscreen.hasDocument()) return;
   await chrome.offscreen.createDocument({
-    url: "offscreen.html", reasons: ["USER_MEDIA", "AUDIO_PLAYBACK"], justification: "Upmix the captured tab's audio",
+    url: "offscreen.html", reasons: ["USER_MEDIA", "WORKERS"], justification: "Upmix the captured tab's audio and relay the in-page upmix to the bridge",
   });
 }
 
@@ -62,7 +62,14 @@ chrome.runtime.onMessage.addListener((m, _sender, reply) => {
 chrome.tabs.onRemoved.addListener(async (id) => { await capturedReady; if (id === capturedTab) stop(); });
 
 // A tab that starts playing pauses every other taking-part tab (the content script of each one acts on it).
-chrome.runtime.onMessage.addListener((m, sender) => {
+chrome.runtime.onMessage.addListener((m, sender, reply) => {
+  if (m.type === "ksf-ensure-offscreen") { ensureOffscreen().then(() => reply({ ok: true }), () => reply({ ok: false })); return true; }
+  if (m.type === "ksf-inpage-failed" && sender.tab) {
+    chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
+    chrome.action.setBadgeText({ text: "!", tabId: sender.tab.id });
+    chrome.action.setTitle({ title: "The in-page upmix could not start here (" + m.why + "). Press Alt+Shift+U to upmix this tab by capture instead.", tabId: sender.tab.id });
+    return;
+  }
   if (m.type !== "ksf-playing" || !sender.tab) return;
   let host = "";
   try { host = new URL(sender.tab.url).host; } catch (e) { /* no url */ }
@@ -70,7 +77,6 @@ chrome.runtime.onMessage.addListener((m, sender) => {
   chrome.tabs.query({}).then((tabs) => {
     for (const t of tabs) if (t.id !== sender.tab.id) chrome.tabs.sendMessage(t.id, { type: "ksf-pause" }).catch(() => {});
   });
-  autoUpmix(sender.tab);
 });
 
 // A site with a saved layout (popup: "Always upmix ...") is upmixed as soon as a tab of it starts playing. Only one

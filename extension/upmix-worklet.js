@@ -18,7 +18,10 @@ class Lp {
   tick(x) { this.y += this.a * (x - this.y); return this.y; }
 }
 
-class Upmix extends AudioWorkletProcessor {
+// The same file is loaded two ways: as an AudioWorklet module (registerProcessor) and, as a fallback, as a plain
+// content script that runs the class from a ScriptProcessor (the page's security policy may refuse a worklet module).
+const BaseProcessor = typeof AudioWorkletProcessor === "function" ? AudioWorkletProcessor : class { constructor() { this.port = { postMessage() {} }; } };
+class Upmix extends BaseProcessor {
   constructor(o) {
     super();
     const opt = o.processorOptions || {};
@@ -28,7 +31,7 @@ class Upmix extends AudioWorkletProcessor {
     // mid), the way the music page's "all" mode does. "ambience": the Pro Logic-like matrix below, where the
     // surrounds and heights carry only the L-R difference and are very quiet on near-mono music.
     this.equal = opt.style === "equal";
-    const r = sampleRate, ms = (v) => Math.round(v * r / 1000);
+    const r = opt.rate || sampleRate, ms = (v) => Math.round(v * r / 1000);
     this.d = {
       SL: new Delay(ms(12)), SR: new Delay(ms(12)), BL: new Delay(ms(24)), BR: new Delay(ms(26)),
       FWL: new Delay(ms(4)), FWR: new Delay(ms(4)), TFL: new Delay(ms(3)), TFR: new Delay(ms(3)),
@@ -93,4 +96,5 @@ class Upmix extends AudioWorkletProcessor {
     return true;
   }
 }
-registerProcessor("ksf-upmix", Upmix);
+if (typeof registerProcessor === "function") registerProcessor("ksf-upmix", Upmix);
+else globalThis.KsfUpmix = Upmix;

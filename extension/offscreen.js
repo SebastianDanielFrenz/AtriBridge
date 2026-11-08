@@ -91,6 +91,54 @@ function connectBridge(speakers) {
   ws.onerror = () => {};
 }
 
+// ---- relay for the in-page upmix (inpage.js): a content script cannot open a socket to the bridge (it would present
+// the page's origin, which the bridge refuses), so its blocks come here over a port and go out as this extension.
+let inpage = null;
+function closeInpage() {
+  if (!inpage) return;
+  const me = inpage;
+  inpage = null;
+  me.dead = true;
+  clearTimeout(me.retry);
+  if (me.ws) { try { me.ws.close(); } catch (e) {} me.ws = null; }
+}
+function connectInpageWs(me) {
+  if (me.dead) return;
+  const ws = new WebSocket(BRIDGE_URL);
+  me.ws = ws;
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => ws.send(JSON.stringify({ type: "hello", rate: me.rate, speakers: me.speakers }));
+  ws.onmessage = (e) => {
+    if (typeof e.data !== "string") return;
+    let m;
+    try { m = JSON.parse(e.data); } catch (err) { return; }
+    if (m.type === "info") me.port.postMessage({ t: "info" });
+    else if (m.type === "gone") me.port.postMessage({ t: "gone" });
+    else if (m.type === "replaced") { me.replaced = true; me.port.postMessage({ t: "replaced" }); }
+  };
+  ws.onclose = () => {
+    if (me.dead || me.replaced) return;
+    try { me.port.postMessage({ t: "closed" }); } catch (err) {}
+    me.retry = setTimeout(() => connectInpageWs(me), 2000);
+  };
+  ws.onerror = () => {};
+}
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "ksf-inpage") return;
+  if (inpage) { try { inpage.port.postMessage({ t: "replaced" }); inpage.port.disconnect(); } catch (e) {} closeInpage(); }
+  const me = { port, ws: null, rate: 48000, speakers: "", dead: false, replaced: false, retry: 0 };
+  inpage = me;
+  port.onMessage.addListener((m) => {
+    if (m.t === "open") { me.rate = m.rate || 48000; me.speakers = m.speakers || ""; connectInpageWs(me); }
+    else if (m.t === "b" && me.ws && me.ws.readyState === 1 && me.ws.bufferedAmount < (1 << 20)) {
+      const bin = atob(m.d), n = bin.length >> 1, f = new Float32Array(n);
+      for (let i = 0; i < n; i++) { const v = (bin.charCodeAt(2 * i) | (bin.charCodeAt(2 * i + 1) << 8)) << 16 >> 16; f[i] = v / 32768; }
+      me.ws.send(f.buffer);
+    }
+  });
+  port.onDisconnect.addListener(() => { if (inpage === me) closeInpage(); });
+});
+
 async function stop(quiet) {
   running = false;
   clearTimeout(retry);

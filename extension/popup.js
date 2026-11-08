@@ -88,8 +88,8 @@ async function joinSite(tab, u) {
   if (!(await chrome.permissions.request({ origins: [origin] }))) return false;
   const id = "ksf-" + u.host;
   try { await chrome.scripting.unregisterContentScripts({ ids: [id] }); } catch (e) { /* not registered yet */ }
-  await chrome.scripting.registerContentScripts([{ id, matches: [origin], js: ["pause-others.js"], runAt: "document_idle", persistAcrossSessions: true }]);
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["pause-others.js"] }).catch(() => {});
+  await chrome.scripting.registerContentScripts([{ id, matches: [origin], js: ["upmix-worklet.js", "pause-others.js", "inpage.js"], runAt: "document_idle", persistAcrossSessions: true }]);
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["upmix-worklet.js", "pause-others.js", "inpage.js"] }).catch(() => {});
   return true;
 }
 async function activeSite() {
@@ -111,9 +111,7 @@ async function saveRule() {
     if (!(await joinSite(a.tab, a.u))) { $("siteRule").checked = false; $("siteHint").textContent = "Access was not granted."; return; }
     sites[a.u.host] = sel.value;
     $("siteHint").textContent = a.u.host + ": always " + sel.value + ".";
-    // The popup counts as invoking the extension on this tab, so the upmix can start right now; later plays in the
-    // same tab restart it by themselves. A new tab needs one invocation again: Alt+Shift+U or this popup.
-    if (!running) chrome.runtime.sendMessage({ cmd: "start", tabId: a.tab.id, layout: sel.value }).then((r) => { if (r && !r.ok) $("state").textContent = "Could not start: " + (r.error || "unknown"); }).catch(() => {});
+    // The page's own audio is upmixed in the page (inpage.js) from its next play on; no capture and no click per tab.
   } else {
     delete sites[a.u.host];
     $("siteHint").textContent = a.u.host + ": upmix only when started by hand.";
