@@ -45,3 +45,11 @@ chrome.runtime.onMessage.addListener((m, _sender, reply) => {
 });
 
 chrome.tabs.onRemoved.addListener((id) => { if (id === capturedTab) stop(); });
+
+// A tab that starts playing pauses every other taking-part tab (the content script of each one acts on it).
+chrome.runtime.onMessage.addListener((m, sender) => {
+  if (m.type !== "ksf-playing" || !sender.tab) return;
+  chrome.tabs.query({}).then((tabs) => {
+    for (const t of tabs) if (t.id !== sender.tab.id) chrome.tabs.sendMessage(t.id, { type: "ksf-pause" }).catch(() => {});
+  });
+});

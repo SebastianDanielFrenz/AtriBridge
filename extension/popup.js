@@ -51,6 +51,7 @@ async function init() {
   const saved = (await chrome.storage.local.get("layout")).layout;
   sel.value = saved && LAYOUTS.includes(saved) ? saved : "7.0";
   hint();
+  $("pauseOthers").checked = (await chrome.storage.local.get("pauseOthers")).pauseOthers !== false;
   show(await chrome.runtime.sendMessage({ cmd: "status" }).catch(() => ({ state: "idle" })));
 }
 
@@ -65,6 +66,22 @@ $("go").addEventListener("click", async () => {
   await chrome.storage.local.set({ layout: sel.value });
   const r = await chrome.runtime.sendMessage({ cmd: "start", tabId: tab.id, layout: sel.value });
   if (!r || !r.ok) show({ state: "idle", error: r && r.error });
+});
+$("pauseOthers").addEventListener("change", () => chrome.storage.local.set({ pauseOthers: $("pauseOthers").checked }));
+// Adds the current tab's site to the sites that take part (asks Chrome for access to it, then injects the script there).
+$("addSite").addEventListener("click", async () => {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  let u;
+  try { u = new URL(tab.url); } catch (e) { return; }
+  if (!/^https?:$/.test(u.protocol)) { $("siteHint").textContent = "This page cannot take part."; return; }
+  const origin = u.origin + "/*";
+  const ok = await chrome.permissions.request({ origins: [origin] });
+  if (!ok) { $("siteHint").textContent = "Access was not granted."; return; }
+  const id = "ksf-" + u.host;
+  try { await chrome.scripting.unregisterContentScripts({ ids: [id] }); } catch (e) { /* not registered yet */ }
+  await chrome.scripting.registerContentScripts([{ id, matches: [origin], js: ["pause-others.js"], runAt: "document_idle", persistAcrossSessions: true }]);
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["pause-others.js"] }).catch(() => {});
+  $("siteHint").textContent = u.host + " now takes part.";
 });
 chrome.runtime.onMessage.addListener((m) => { if (m.type === "status") show(m.status); });
 init();

@@ -7,3 +7,7 @@ button { margin-top: 12px; cursor: pointer; border: 0; background: #3b82f6; colo
 button.stop { background: #ef4444; }
 .hint, #state { margin: 8px 0 0; color: GrayText; }
 .warn { margin: 8px 0 0; color: #d97706; }
+hr { margin: 14px 0 10px; border: 0; border-top: 1px solid color-mix(in srgb, GrayText 35%, transparent); }
+label.check { display: flex; gap: 8px; align-items: flex-start; color: inherit; }
+label.check input { margin-top: 3px; }
+button.secondary { background: transparent; color: inherit; border: 1px solid color-mix(in srgb, GrayText 50%, transparent); font-weight: 500; margin-top: 8px; }

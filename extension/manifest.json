@@ -1,10 +1,38 @@
 {
   "manifest_version": 3,
   "name": "KSF Surround Upmix",
-  "version": "0.1.0",
-  "description": "Upmixes the audio of a tab (YouTube, YouTube Music, anything) to 5.0 / 7.0 / 9.0, or with the KSF Spatial Bridge to 5.0.2 ... 9.0.6.",
+  "version": "0.2.0",
+  "description": "Upmixes the audio of a tab (YouTube, YouTube Music, anything) to 5.0 / 7.0 / 9.0, or with the KSF Spatial Bridge to 5.0.2 ... 9.0.6. Also pauses the other music tabs when one starts.",
   "minimum_chrome_version": "116",
-  "permissions": ["tabCapture", "offscreen", "activeTab", "storage"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_title": "Upmix this tab", "default_popup": "popup.html" }
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "activeTab",
+    "storage",
+    "scripting"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Upmix this tab",
+    "default_popup": "popup.html"
+  },
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://music.youtube.com/*",
+        "https://www.youtube.com/*",
+        "https://*.ksfhost.de/*"
+      ],
+      "js": [
+        "pause-others.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
 }
