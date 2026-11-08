@@ -32,7 +32,8 @@
     let port = null, closeT = 0;
     const r = {
       live: false,
-      blocked: false,                                  // the bridge was taken from this route: it stays out until the element is paused once
+      state: "connecting",                             // connecting | live | gone (no Spatial Sound) | closed (app not reachable) | taken
+      blocked: false,                                 // the bridge was taken from this route: it stays out until the element is paused once
       async open() {
         clearTimeout(closeT);
         if (port || r.opening || r.blocked) return;
@@ -47,10 +48,10 @@
         const mine = port;
         port.onMessage.addListener((m) => {
           if (port !== mine) return;
-          if (m.t === "info") { r.live = true; r.wasLive = true; e.setBridge(true); }
-          else if (m.t === "superseded") { r.blocked = true; r.live = false; e.setBridge(false); r.drop(); if (owner === e) owner = null; }   // another route of THIS page took it: no pause
+          if (m.t === "info") { r.live = true; r.wasLive = true; r.state = "live"; e.setBridge(true); }
+          else if (m.t === "superseded") { r.blocked = true; r.live = false; r.state = "taken"; e.setBridge(false); r.drop(); if (owner === e) owner = null; }   // another route of THIS page took it: no pause
           else if (m.t === "gone" || m.t === "closed" || m.t === "replaced") {
-            r.live = false; e.setBridge(false);
+            r.live = false; r.state = m.t === "replaced" ? "taken" : m.t; e.setBridge(false);
             if (m.t === "replaced") {
               const had = r.wasLive; r.wasLive = false;                // the bridge went to another page: this one stops, and only a new play takes it back
               r.blocked = true; r.drop(); if (owner === e) owner = null;
@@ -200,6 +201,7 @@
       rule: cfg.layout, suspended, bridge, built: built.length, playing: playing.length,
       ctxRunning: src.length ? src.some((e) => e.ctx.state === "running") : null,
       live: src.some((e) => e.route && e.route.live),
+      route: (src.find((e) => e.route) || { route: { state: "" } }).route.state,
       blocked: src.some((e) => e.route && e.route.blocked),
       how: src.length ? src[0].how : "",
     };

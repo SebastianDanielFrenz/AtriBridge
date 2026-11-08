@@ -68,6 +68,8 @@ function renderPage() {
       if (p.blocked) line += " - the bridge is used by another page, press play here to take it back";
       else if (p.ctxRunning === false) line += " - waiting for a click on the page (the browser blocks the audio until then)";
       else if (p.live) line += " - bridge connected";
+      else if (p.route === "closed") line += " - the bridge app does not answer on port 47321 (running? firewall?)";
+      else if (p.route === "gone") line += " - the bridge says Windows Spatial Sound is not available on the default output";
       else line += " - connecting to the bridge...";
     }
   }
