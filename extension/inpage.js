@@ -119,7 +119,7 @@
       node.connect(e.ctx.destination);
       e.pass.gain.value = 0;
     }
-    console.debug("[ksf-upmix] in-page upmix on", location.host, cfg.layout, cfg.style, e.how, speakers.length + " ch");
+    console.info("[ksf-upmix] in-page upmix on", location.host, cfg.layout, cfg.style, e.how, speakers.length + " ch");
   }
 
   function teardown(e) {
