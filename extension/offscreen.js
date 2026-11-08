@@ -19,20 +19,22 @@ async function start({ streamId, layout }) {
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId } },
   });
-  ctx = new AudioContext({ sampleRate: 48000, latencyHint: "interactive" });
+  // The bridge path is fixed at 48 kHz (the app resamples nothing). The browser-output path takes the device's own
+  // rate, like the music page does: a forced rate gave 2 channels on a device whose 7.1 the page reaches (user, 2026-11-08).
+  ctx = new AudioContext(bridge ? { sampleRate: 48000, latencyHint: "interactive" } : { latencyHint: "interactive" });
   await ctx.audioWorklet.addModule("upmix-worklet.js");
   const src = ctx.createMediaStreamSource(stream);
   let speakers, note = "";
   if (bridge) {
     speakers = speakersOf(layout);
   } else {
-    const max = ctx.destination.maxChannelCount;
+    const max = ctx.destination.maxChannelCount || 2;
     const want = speakersOf(layout).length + 1;           // + LFE
     const ch = max >= 8 && want > 6 ? 8 : max >= 6 ? 6 : 2;
     speakers = DIRECT_ORDER[ch];
     const lost = speakersOf(layout).filter((s) => !speakers.includes(s));
     if (lost.length) {
-      note = "This output only has " + (ch === 2 ? "stereo" : ch === 6 ? "5.1" : "7.1") + ": " + lost.join(", ") +
+      note = "The browser sees " + max + " output channels. This output only has " + (ch === 2 ? "stereo" : ch === 6 ? "5.1" : "7.1") + ": " + lost.join(", ") +
         " are folded into the nearest speaker." + (ch < 8 ? " Set the Windows speaker setup to 7.1 for the full bed." : "");
     }
   }
