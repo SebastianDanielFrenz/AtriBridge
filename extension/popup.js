@@ -68,21 +68,57 @@ $("go").addEventListener("click", async () => {
   if (!r || !r.ok) show({ state: "idle", error: r && r.error });
 });
 $("pauseOthers").addEventListener("change", () => chrome.storage.local.set({ pauseOthers: $("pauseOthers").checked }));
-// Adds the current tab's site to the sites that take part (asks Chrome for access to it, then injects the script there).
-$("addSite").addEventListener("click", async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  let u;
-  try { u = new URL(tab.url); } catch (e) { return; }
-  if (!/^https?:$/.test(u.protocol)) { $("siteHint").textContent = "This page cannot take part."; return; }
+// Lets the current tab's site take part (asks Chrome for access to it, then injects the script there).
+async function joinSite(tab, u) {
   const origin = u.origin + "/*";
-  const ok = await chrome.permissions.request({ origins: [origin] });
-  if (!ok) { $("siteHint").textContent = "Access was not granted."; return; }
+  if (!(await chrome.permissions.request({ origins: [origin] }))) return false;
   const id = "ksf-" + u.host;
   try { await chrome.scripting.unregisterContentScripts({ ids: [id] }); } catch (e) { /* not registered yet */ }
   await chrome.scripting.registerContentScripts([{ id, matches: [origin], js: ["pause-others.js"], runAt: "document_idle", persistAcrossSessions: true }]);
   await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["pause-others.js"] }).catch(() => {});
-  $("siteHint").textContent = u.host + " now takes part.";
+  return true;
+}
+async function activeSite() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  try { const u = new URL(tab.url); if (/^https?:$/.test(u.protocol)) return { tab, u }; } catch (e) { /* no page */ }
+  return null;
+}
+$("addSite").addEventListener("click", async () => {
+  const a = await activeSite();
+  if (!a) { $("siteHint").textContent = "This page cannot take part."; return; }
+  $("siteHint").textContent = (await joinSite(a.tab, a.u)) ? a.u.host + " now takes part." : "Access was not granted.";
 });
+// Per-site layout: a tab of this site that starts playing is upmixed with the layout saved here, no click needed.
+async function saveRule() {
+  const a = await activeSite();
+  if (!a) { $("siteRule").checked = false; $("siteHint").textContent = "This page cannot be upmixed automatically."; return; }
+  const sites = (await chrome.storage.local.get("sites")).sites || {};
+  if ($("siteRule").checked) {
+    if (!(await joinSite(a.tab, a.u))) { $("siteRule").checked = false; $("siteHint").textContent = "Access was not granted."; return; }
+    sites[a.u.host] = sel.value;
+    $("siteHint").textContent = a.u.host + ": always " + sel.value + ".";
+  } else {
+    delete sites[a.u.host];
+    $("siteHint").textContent = a.u.host + ": upmix only when started by hand.";
+  }
+  await chrome.storage.local.set({ sites });
+}
+$("siteRule").addEventListener("change", saveRule);
+sel.addEventListener("change", async () => {
+  if (!$("siteRule").checked) return;
+  const a = await activeSite();
+  if (!a) return;
+  const sites = (await chrome.storage.local.get("sites")).sites || {};
+  sites[a.u.host] = sel.value;
+  await chrome.storage.local.set({ sites });
+});
+async function showRule() {
+  const a = await activeSite();
+  if (!a) { $("siteRule").disabled = true; return; }
+  $("siteRuleText").textContent = "Always upmix " + a.u.host + " with this layout";
+  const sites = (await chrome.storage.local.get("sites")).sites || {};
+  if (sites[a.u.host] && LAYOUTS.includes(sites[a.u.host])) { $("siteRule").checked = true; sel.value = sites[a.u.host]; hint(); }
+}
 chrome.runtime.onMessage.addListener((m) => { if (m.type === "status") show(m.status); });
 $("version").textContent = "v" + chrome.runtime.getManifest().version;
-init();
+init().then(showRule);

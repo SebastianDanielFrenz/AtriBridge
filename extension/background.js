@@ -52,4 +52,21 @@ chrome.runtime.onMessage.addListener((m, sender) => {
   chrome.tabs.query({}).then((tabs) => {
     for (const t of tabs) if (t.id !== sender.tab.id) chrome.tabs.sendMessage(t.id, { type: "ksf-pause" }).catch(() => {});
   });
+  autoUpmix(sender.tab);
 });
+
+// A site with a saved layout (popup: "Always upmix ...") is upmixed as soon as a tab of it starts playing. Only one
+// capture exists at a time: this tab replaces the previous one, which is paused by the code above anyway.
+async function autoUpmix(tab) {
+  if (tab.id === capturedTab) return;
+  let host;
+  try { host = new URL(tab.url).host; } catch (e) { return; }
+  const layout = ((await chrome.storage.local.get("sites")).sites || {})[host];
+  if (!layout) return;
+  const r = await start(tab.id, layout).catch((e) => ({ ok: false, error: String((e && e.message) || e) }));
+  if (!r || !r.ok) {
+    chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
+    chrome.action.setBadgeText({ text: "!", tabId: tab.id });
+    chrome.action.setTitle({ title: "Auto-upmix failed: " + ((r && r.error) || "unknown") + ". Click the icon and press Upmix this tab.", tabId: tab.id });
+  }
+}
