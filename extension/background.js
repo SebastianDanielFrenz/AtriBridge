@@ -57,8 +57,14 @@ chrome.runtime.onMessage.addListener((m, sender) => {
 
 // A site with a saved layout (popup: "Always upmix ...") is upmixed as soon as a tab of it starts playing. Only one
 // capture exists at a time: this tab replaces the previous one, which is paused by the code above anyway.
+// Starting a capture makes the tab's media element stall and fire "playing" again; without the guards below every one
+// of those events restarted the capture (user, 2026-11-08: half a second of sound, 2 s of silence, forever).
+const autoTried = new Map();
 async function autoUpmix(tab) {
   if (tab.id === capturedTab) return;
+  const last = autoTried.get(tab.id) || 0;
+  if (Date.now() - last < 15000) return;          // one attempt per tab per 15 s, whatever the result
+  autoTried.set(tab.id, Date.now());
   let host;
   try { host = new URL(tab.url).host; } catch (e) { return; }
   const layout = ((await chrome.storage.local.get("sites")).sites || {})[host];
