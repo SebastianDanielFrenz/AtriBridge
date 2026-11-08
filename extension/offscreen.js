@@ -8,6 +8,12 @@ let status = { state: "idle" };
 let replaced = false, capSpeakers = null;
 
 
+// An offscreen document only has chrome.runtime (no chrome.storage): reading the bridge's reply must never depend on
+// it, so the device is handed to the background script, which stores it for the popup.
+function rememberDevice(m) {
+  try { chrome.runtime.sendMessage({ type: "ksf-device", device: { bed: m.bed, objects: m.objects || 0, name: m.device, t: Date.now() } }).catch(() => {}); } catch (e) { /* not important */ }
+}
+
 function setStatus(patch) {
   status = { ...status, ...patch };
   chrome.runtime.sendMessage({ type: "status", status }).catch(() => {});
@@ -74,7 +80,7 @@ function connectBridge(speakers) {
     let m;
     try { m = JSON.parse(e.data); } catch (err) { return; }
     if (m.type === "info") {
-      chrome.storage.local.set({ device: { bed: m.bed, objects: m.objects || 0, name: m.device, t: Date.now() } }).catch(() => {});
+      rememberDevice(m);
       const need = speakers.length, have = m.objects || 0;
       setStatus({
         bridgeState: "ok", device: m.device, bed: m.bed, objects: have,
@@ -122,7 +128,7 @@ function connectInpageWs(me) {
     let m;
     try { m = JSON.parse(e.data); } catch (err) { return; }
     if (m.type === "info") {
-      chrome.storage.local.set({ device: { bed: m.bed, objects: m.objects || 0, name: m.device, t: Date.now() } }).catch(() => {});
+      rememberDevice(m);
       me.port.postMessage({ t: "info" });
     }
     else if (m.type === "gone") me.port.postMessage({ t: "gone" });

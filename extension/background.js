@@ -72,6 +72,7 @@ chrome.tabs.onRemoved.addListener(async (id) => { await capturedReady; if (id ==
 
 // A tab that starts playing pauses every other taking-part tab (the content script of each one acts on it).
 chrome.runtime.onMessage.addListener((m, sender, reply) => {
+  if (m.type === "ksf-device" && m.device) { chrome.storage.local.set({ device: m.device }).catch(() => {}); return; }
   if (m.type === "ksf-ensure-offscreen") { ensureOffscreen().then(() => reply({ ok: true }), () => reply({ ok: false })); return true; }
   if (m.type === "ksf-inpage-failed" && sender.tab) {
     chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
