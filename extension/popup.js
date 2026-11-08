@@ -79,14 +79,13 @@ async function init() {
   const saved = (await chrome.storage.local.get("layout")).layout;
   sel.value = saved && LAYOUTS.includes(saved) && canUse(saved) ? saved : (sel.options[0] ? sel.options[0].value : "");
   hint();
-  $("style").value = (await chrome.storage.local.get("style")).style || "equal";
   $("pauseOthers").checked = (await chrome.storage.local.get("pauseOthers")).pauseOthers !== false;
   show(await chrome.runtime.sendMessage({ cmd: "status" }).catch(() => ({ state: "idle" })));
 }
 
 let userPicked = 0;
 sel.addEventListener("change", () => { hint(); userPicked = Date.now(); chrome.storage.local.set({ layout: sel.value }); restartIfRunning(); });
-// Changing the layout or style while a tab is being upmixed restarts the upmix with the new one.
+// Changing the layout while a tab is being upmixed restarts the upmix with the new one.
 async function restartIfRunning() {
   if (!running) return;
   const r = await chrome.runtime.sendMessage({ cmd: "restart", layout: sel.value }).catch((e) => ({ ok: false, error: String(e) }));
@@ -108,7 +107,6 @@ $("go").addEventListener("click", async () => {
   const r = await chrome.runtime.sendMessage({ cmd: "start", tabId: tab.id, layout: sel.value });
   if (!r || !r.ok) show({ state: "idle", error: r && r.error });
 });
-$("style").addEventListener("change", async () => { await chrome.storage.local.set({ style: $("style").value }); restartIfRunning(); });
 $("pauseOthers").addEventListener("change", () => chrome.storage.local.set({ pauseOthers: $("pauseOthers").checked }));
 // Lets the current tab's site take part (asks Chrome for access to it, then injects the script there).
 async function joinSite(tab, u) {

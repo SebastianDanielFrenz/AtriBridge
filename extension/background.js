@@ -19,8 +19,7 @@ async function start(tabId, layout) {
   if (await chrome.offscreen.hasDocument()) await chrome.runtime.sendMessage({ target: "offscreen", cmd: "stop" }).catch(() => {});
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
   await ensureOffscreen();
-  const style = (await chrome.storage.local.get("style")).style || "equal";
-  const r = await chrome.runtime.sendMessage({ target: "offscreen", cmd: "start", streamId, layout, style });
+  const r = await chrome.runtime.sendMessage({ target: "offscreen", cmd: "start", streamId, layout });
   if (r && r.ok) { setCaptured(tabId); inpageSuspend(tabId, true); }      // the capture takes the tab: the in-page upmix steps aside
   return r;
 }
@@ -49,7 +48,7 @@ chrome.runtime.onMessage.addListener((m, _sender, reply) => {
     stop().then(() => reply({ ok: true }));
     return true;
   }
-  if (m.cmd === "restart") {                 // layout or style changed in the popup while a tab is being upmixed
+  if (m.cmd === "restart") {                 // layout changed in the popup while a tab is being upmixed
     capturedReady.then(() => {
       if (capturedTab == null) return reply({ ok: false, error: "no tab is being upmixed" });
       return start(capturedTab, m.layout).then(reply, (e) => reply({ ok: false, error: String((e && e.message) || e) }));

@@ -115,7 +115,13 @@ tab, click the icon, pick a layout, press Upmix. The tab's own sound is muted wh
   BL BR TFL TFR TBL TBR), as a positioned dynamic object where it has none (FWL FWR TML TMR; needs the
   device to offer dynamic objects), and folds a speaker into the nearest bed speaker when neither is
   available. The extension reports the object count the device offers and warns when a layout needs more.
-- The upmix is a plain matrix (centre = common part, surrounds and heights = delayed, filtered
-  difference part), see `extension/upmix-worklet.js`.
+- The upmix has no settings: every speaker plays its side of the stereo at the full level (left-side speakers
+  get L, right-side speakers R, the centre the mid (L+R)/2, the LFE nothing), like the music page's "all" mode,
+  see `extension/upmix-worklet.js`. A speaker the output lacks is not played; without a centre speaker the mid
+  is added to FL and FR at -3 dB. (Versions up to 0.6.11 had a Style dropdown with a second, quieter "Ambience"
+  matrix; it was removed in 0.6.12.)
+- **One owner at a time:** the bridge serves one client, the newest connection wins. A page or tab that loses
+  the bridge is paused and does not take it back by itself; pressing play on it claims the bridge again. The
+  music page and the extension follow the same rule.
 - **Untested:** the 9.x layouts (the two wide speakers FWL / FWR, as dynamic objects) have not been verified on
   real 9.x hardware; 5.x and 7.x on a 7.1.4 device are the tested ground.

@@ -13,7 +13,7 @@ function setStatus(patch) {
   chrome.runtime.sendMessage({ type: "status", status }).catch(() => {});
 }
 
-async function start({ streamId, layout, style }) {
+async function start({ streamId, layout }) {
   await stop(true);
   replaced = false; openAt = 0;
   const bridge = needsBridge(layout);
@@ -42,7 +42,7 @@ async function start({ streamId, layout, style }) {
   node = new AudioWorkletNode(ctx, "ksf-upmix", {
     numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [speakers.length],
     channelCount: 2, channelCountMode: "explicit",
-    processorOptions: { speakers, emit: bridge, style },
+    processorOptions: { speakers, emit: bridge },
   });
   src.connect(node);
   if (bridge) {

@@ -10,14 +10,14 @@
   window.__ksfInpage = true;
   const entries = new WeakMap();                 // element -> entry
   const live = new Set();                        // entries, to rebuild them when the saved layout changes
-  let cfg = { layout: null, style: "equal" };
+  let cfg = { layout: null };
   let owner = null;                              // the entry that holds the bridge: one per page (YouTube has several media elements)
   let suspended = false;                         // the tab is under capture: this route stays out of the way
   const layouts = () => globalThis.KsfLayouts;     // layouts.js is the first content script
 
   async function loadCfg() {
-    const st = await chrome.storage.local.get(["sites", "style"]);
-    cfg = { layout: (st.sites || {})[location.host] || null, style: st.style || "equal" };
+    const st = await chrome.storage.local.get("sites");
+    cfg = { layout: (st.sites || {})[location.host] || null };
   }
 
   function b64(i16) {
@@ -89,7 +89,7 @@
       speakers = L.DIRECT_ORDER[ch];
     }
     e.speakers = speakers;
-    const opts = { speakers, emit: bridge, style: cfg.style, rate: e.ctx.sampleRate };
+    const opts = { speakers, emit: bridge, rate: e.ctx.sampleRate };
     let node;
     try {
       await e.ctx.audioWorklet.addModule(chrome.runtime.getURL("upmix-worklet.js"));
@@ -129,7 +129,7 @@
       node.connect(e.ctx.destination);
       e.pass.gain.value = 0;
     }
-    console.info("[ksf-upmix] in-page upmix on", location.host, cfg.layout, cfg.style, e.how, speakers.length + " ch");
+    console.info("[ksf-upmix] in-page upmix on", location.host, cfg.layout, e.how, speakers.length + " ch");
   }
 
   function teardown(e) {
@@ -192,7 +192,7 @@
     if (!suspended && cfg.layout) for (const el of document.querySelectorAll("audio, video")) if (!el.paused) consider(el);
   });
   chrome.storage.onChanged.addListener(async (c) => {
-    if (!c.sites && !c.style) return;
+    if (!c.sites) return;
     await loadCfg();
     for (const e of live) build(e).catch(() => { e.pass.gain.value = 1; });
     if (cfg.layout) for (const el of document.querySelectorAll("audio, video")) if (!el.paused) consider(el);
