@@ -102,7 +102,7 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
-constexpr const char *kVersion = "1.2.3";      // must equal --version given to tools/publish.py for this build
+constexpr const char *kVersion = "1.2.4";      // must equal --version given to tools/publish.py for this build
 // Where updates come from when nothing else is configured. Replace with your own server or GitHub repository
 // (--update-url / --update-github / spatial-bridge.conf).
 constexpr const char *kDefaultUpdateSource = "https://media-dl.ksfhost.de/api/public/spatial-bridge/latest.json";
@@ -620,7 +620,14 @@ void serve_client(SOCKET c, const std::vector<std::string> &extra_origins, const
         message.clear();
     }
     // A replaced connection ends AFTER the new one has started: its teardown must not clear the new one's state.
-    if (!still_current()) { blog("an older client connection ended (replaced by a newer one)"); return; }
+    if (!still_current()) {
+        // Tell it, so it does not reconnect at once and replace the newer one in turn (two pages, or a page and the
+        // browser extension, used to take the app from each other every second or so).
+        send_frame(c, 1, "{\"type\":\"replaced\"}");
+        send_frame(c, 8, std::string());
+        blog("an older client connection ended (replaced by a newer one; it was told)");
+        return;
+    }
     blog("client disconnected");
     g_client_connected = false;
     std::lock_guard<std::mutex> lock(g_mu);
@@ -658,7 +665,7 @@ void net_thread(int port, std::vector<std::string> extra_origins) {
         SOCKET c = accept(ls, nullptr, nullptr);
         if (c == INVALID_SOCKET) continue;
         SOCKET old = current.exchange(c);                   // a new page replaces the old connection
-        if (old != INVALID_SOCKET) shutdown(old, SD_BOTH);
+        if (old != INVALID_SOCKET) shutdown(old, SD_RECEIVE);        // stop reading it; its thread still tells it it was replaced
         auto done = std::make_shared<std::atomic<bool>>(false);
         clients.push_back({std::thread([c, done, &extra_origins, &current] {
             serve_client(c, extra_origins, [&current, c] { return current.load() == c; });

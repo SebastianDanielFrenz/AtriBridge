@@ -4,6 +4,8 @@ import { speakersOf, needsBridge, DIRECT_ORDER } from "./layouts.js";
 const BRIDGE_URL = "ws://127.0.0.1:47321";
 let ctx = null, stream = null, node = null, ws = null, running = false, retry = null;
 let status = { state: "idle" };
+let replaced = false;
+
 
 function setStatus(patch) {
   status = { ...status, ...patch };
@@ -12,6 +14,7 @@ function setStatus(patch) {
 
 async function start({ streamId, layout }) {
   await stop(true);
+  replaced = false;
   const bridge = needsBridge(layout);
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId } },
@@ -71,12 +74,15 @@ function connectBridge(speakers) {
         bridgeState: "ok", device: m.device, bed: m.bed, objects: have,
         warn: have && need > have ? "The output offers " + have + " speaker objects, this layout has " + need + ": the extra ones are folded." : "",
       });
+    } else if (m.type === "replaced") {          // another page or tab took the app: do not take it back in a loop
+      replaced = true;
+      setStatus({ bridgeState: "taken", warn: "The bridge is in use by another page. Press Start again to take it back." });
     } else if (m.type === "gone") {
       setStatus({ bridgeState: "nospatial", warn: "Turn on Windows Spatial Sound (Dolby Atmos / Windows Sonic) for the default output." });
     }
   };
   ws.onclose = () => {
-    if (!running) return;
+    if (!running || replaced) return;
     setStatus({ bridgeState: "missing" });
     retry = setTimeout(() => connectBridge(speakers), 2000);
   };
