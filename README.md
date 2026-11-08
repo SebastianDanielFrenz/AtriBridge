@@ -73,6 +73,23 @@ and put `release/latest.json` + `release/ksf-spatial-bridge.exe` on the server o
 private key out of the repository and backed up; `tools/make_pubkey_header.py KEY.pem` regenerates the public
 half for a new key (apps built with the old key then cannot update to builds signed with the new one).
 
+Full checklist (what was done for v1.2.4, repo `SebastianDanielFrenz/AtriBridge`):
+
+1. Bump `kVersion` in `src/main.cpp` and `version` in `extension/manifest.json` if the extension changed; build;
+   commit and push `master`.
+2. `python tools/publish.py ...` (above) writes the signed `release/latest.json` + exe. Commit `release/`.
+3. Zip the extension with `manifest.json` at the zip root (a stable name, so `releases/latest/download/` works):
+   `Compress-Archive -Path extension\* -DestinationPath ksf-spatial-bridge-extension.zip` (zips are git-ignored).
+4. GitHub release, tag `vX.Y.Z` of the bridge (the extension version goes in the title):
+   `gh release create vX.Y.Z release/ksf-spatial-bridge.exe release/latest.json ksf-spatial-bridge-extension.zip --repo SebastianDanielFrenz/AtriBridge --title "Bridge X.Y.Z / extension A.B.C" --notes "..."`.
+   Bridges started with `--update-github SebastianDanielFrenz/AtriBridge` pick it up through
+   `releases/latest/download/latest.json`. Check that URL answers 200 afterwards.
+5. The AtriHord server (media-dl.ksfhost.de, the built-in default source): copy `latest.json` + the exe into
+   `web_files/app/spatial-bridge/` of the AtriHord deployment. The exe is not in the AtriHord repo, so a `git pull`
+   there never delivers it.
+6. The extension has no update channel: users download the zip from the release, unzip and Load unpacked again
+   (or press reload on the extension card when the folder was replaced in place).
+
 ## Scheduling
 
 The audio thread registers with the Windows Multimedia Class Scheduler (task "Pro Audio", critical priority; falls
