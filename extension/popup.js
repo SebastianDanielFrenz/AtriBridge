@@ -84,4 +84,5 @@ $("addSite").addEventListener("click", async () => {
   $("siteHint").textContent = u.host + " now takes part.";
 });
 chrome.runtime.onMessage.addListener((m) => { if (m.type === "status") show(m.status); });
+$("version").textContent = "KSF Surround Upmix " + chrome.runtime.getManifest().version;
 init();
