@@ -12,7 +12,8 @@ async function ensureOffscreen() {
 async function start(tabId, layout) {
   const streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: tabId });
   await ensureOffscreen();
-  const r = await chrome.runtime.sendMessage({ target: "offscreen", cmd: "start", streamId, layout });
+  const style = (await chrome.storage.local.get("style")).style || "equal";
+  const r = await chrome.runtime.sendMessage({ target: "offscreen", cmd: "start", streamId, layout, style });
   if (r && r.ok) capturedTab = tabId;
   return r;
 }

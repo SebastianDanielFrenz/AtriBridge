@@ -51,6 +51,7 @@ async function init() {
   const saved = (await chrome.storage.local.get("layout")).layout;
   sel.value = saved && LAYOUTS.includes(saved) ? saved : "7.0";
   hint();
+  $("style").value = (await chrome.storage.local.get("style")).style || "equal";
   $("pauseOthers").checked = (await chrome.storage.local.get("pauseOthers")).pauseOthers !== false;
   show(await chrome.runtime.sendMessage({ cmd: "status" }).catch(() => ({ state: "idle" })));
 }
@@ -67,6 +68,7 @@ $("go").addEventListener("click", async () => {
   const r = await chrome.runtime.sendMessage({ cmd: "start", tabId: tab.id, layout: sel.value });
   if (!r || !r.ok) show({ state: "idle", error: r && r.error });
 });
+$("style").addEventListener("change", () => chrome.storage.local.set({ style: $("style").value }));   // applies at the next start
 $("pauseOthers").addEventListener("change", () => chrome.storage.local.set({ pauseOthers: $("pauseOthers").checked }));
 // Lets the current tab's site take part (asks Chrome for access to it, then injects the script there).
 async function joinSite(tab, u) {

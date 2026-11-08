@@ -24,6 +24,10 @@ class Upmix extends AudioWorkletProcessor {
     const opt = o.processorOptions || {};
     this.names = opt.speakers;
     this.emit = !!opt.emit;
+    // "equal": every speaker plays its side of the stereo at the full level (left side L, right side R, centre the
+    // mid), the way the music page's "all" mode does. "ambience": the Pro Logic-like matrix below, where the
+    // surrounds and heights carry only the L-R difference and are very quiet on near-mono music.
+    this.equal = opt.style === "equal";
     const r = sampleRate, ms = (v) => Math.round(v * r / 1000);
     this.d = {
       SL: new Delay(ms(12)), SR: new Delay(ms(12)), BL: new Delay(ms(24)), BR: new Delay(ms(26)),
@@ -34,7 +38,7 @@ class Upmix extends AudioWorkletProcessor {
     for (const k of ["SL", "SR", "BL", "BR"]) this.lp[k] = new Lp(7000, r);
     this.hp = {};   // high-pass = x - lowpass(x)
     for (const k of ["TFL", "TFR", "TML", "TMR", "TBL", "TBR"]) this.hp[k] = new Lp(800, r);
-    this.gain = 0.75;
+    this.gain = this.equal ? 1 : 0.75;
     this.block = 480;
     this.acc = new Float32Array(this.block * this.names.length);
     this.fill = 0;
@@ -57,6 +61,10 @@ class Upmix extends AudioWorkletProcessor {
     const sig = this.sig, d = this.d, g = this.gain, v = this.v;
     for (let i = 0; i < n; i++) {
       const l = L[i], r = R[i], m = 0.5 * (l + r), s = 0.5 * (l - r);
+      if (this.equal) {
+        sig.FL = l; sig.FR = r; sig.FC = m; sig.SL = l; sig.SR = r; sig.BL = l; sig.BR = r; sig.FWL = l; sig.FWR = r;
+        sig.TFL = l; sig.TFR = r; sig.TML = l; sig.TMR = r; sig.TBL = l; sig.TBR = r;
+      } else {
       sig.FL = l - 0.3 * m; sig.FR = r - 0.3 * m; sig.FC = 0.9 * m;
       sig.SL = d.SL.tick(this.lp.SL.tick(0.8 * s + 0.25 * l));
       sig.SR = d.SR.tick(this.lp.SR.tick(-0.8 * s + 0.25 * r));
@@ -66,8 +74,9 @@ class Upmix extends AudioWorkletProcessor {
       sig.TFL = d.TFL.tick(this.hpf("TFL", 0.45 * l + 0.25 * s)); sig.TFR = d.TFR.tick(this.hpf("TFR", 0.45 * r - 0.25 * s));
       sig.TML = d.TML.tick(this.hpf("TML", 0.35 * l + 0.35 * s)); sig.TMR = d.TMR.tick(this.hpf("TMR", 0.35 * r - 0.35 * s));
       sig.TBL = d.TBL.tick(this.hpf("TBL", 0.3 * s + 0.15 * l)); sig.TBR = d.TBR.tick(this.hpf("TBR", -0.3 * s + 0.15 * r));
+      }
       for (let c = 0; c < nc; c++) v[c] = names[c] === "LFE" ? 0 : sig[names[c]];
-      for (let f = 0; f < this.fold.length; f++) v[this.fold[f][1]] += 0.8 * sig[this.fold[f][0]];
+      if (!this.equal) for (let f = 0; f < this.fold.length; f++) v[this.fold[f][1]] += 0.8 * sig[this.fold[f][0]];   // (equal: a speaker that is missing is just a copy of one that is there)
       if (this.fc) { v[this.fc[0]] += 0.707 * sig.FC; v[this.fc[1]] += 0.707 * sig.FC; }
       for (let c = 0; c < nc; c++) {
         let x = v[c] * g;
