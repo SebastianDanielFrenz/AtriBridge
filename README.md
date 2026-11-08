@@ -117,6 +117,12 @@ tab, click the icon, pick a layout, press Upmix. The tab's own sound is muted wh
   BL BR TFL TFR TBL TBR), as a positioned dynamic object where it has none (FWL FWR TML TMR; needs the
   device to offer dynamic objects), and folds a speaker into the nearest bed speaker when neither is
   available. The extension reports the object count the device offers and warns when a layout needs more.
+- **Always upmix a site** (popup, tick "Always upmix <site> with this layout"): the page's own `<video>` / `<audio>`
+  is routed through the upmix inside the page (`extension/inpage.js`) as soon as it plays, with no click and no tab
+  capture; the popup shows the state (bridge connected, waiting for a click on the page, the bridge in use by another
+  page, ...) and Stop / Upmix this tab switch it off and on for that tab. Without a rule, the button and
+  Alt+Shift+U upmix the tab by capture instead, which Chrome only allows after one click or key per tab. Cross-origin
+  media without CORS plays silence through Web Audio; YouTube's streams are fine.
 - The upmix has no settings: every speaker plays its side of the stereo at the full level (left-side speakers
   get L, right-side speakers R, the centre the mid (L+R)/2, the LFE nothing), like the music page's "all" mode,
   see `extension/upmix-worklet.js`. A speaker the output lacks is not played; without a centre speaker the mid
