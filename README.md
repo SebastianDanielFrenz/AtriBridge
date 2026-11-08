@@ -83,7 +83,9 @@ Full checklist (what was done for v1.2.4, repo `SebastianDanielFrenz/AtriBridge`
 4. GitHub release, tag `vX.Y.Z` of the bridge (the extension version goes in the title):
    `gh release create vX.Y.Z release/ksf-spatial-bridge.exe release/latest.json ksf-spatial-bridge-extension.zip --repo SebastianDanielFrenz/AtriBridge --title "Bridge X.Y.Z / extension A.B.C" --notes "..."`.
    Bridges started with `--update-github SebastianDanielFrenz/AtriBridge` pick it up through
-   `releases/latest/download/latest.json`. Check that URL answers 200 afterwards.
+   `releases/latest/download/latest.json`. Check that URL answers 200 afterwards. An extension-only release (same
+   bridge) uses a tag like `ext-A.B.C` and still attaches the unchanged exe and `latest.json`, because
+   `releases/latest/` points at the newest release and must always find all three files.
 5. The AtriHord server (media-dl.ksfhost.de, the built-in default source): copy `latest.json` + the exe into
    `web_files/app/spatial-bridge/` of the AtriHord deployment. The exe is not in the AtriHord repo, so a `git pull`
    there never delivers it.
