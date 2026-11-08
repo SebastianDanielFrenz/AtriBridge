@@ -47,12 +47,14 @@
         const mine = port;
         port.onMessage.addListener((m) => {
           if (port !== mine) return;
-          if (m.t === "info") { r.live = true; e.setBridge(true); }
+          if (m.t === "info") { r.live = true; r.wasLive = true; e.setBridge(true); }
+          else if (m.t === "superseded") { r.blocked = true; r.live = false; e.setBridge(false); r.drop(); if (owner === e) owner = null; }   // another route of THIS page took it: no pause
           else if (m.t === "gone" || m.t === "closed" || m.t === "replaced") {
             r.live = false; e.setBridge(false);
-            if (m.t === "replaced") {                // the bridge went to another page: this one stops, and only a new play takes it back
+            if (m.t === "replaced") {
+              const had = r.wasLive; r.wasLive = false;                // the bridge went to another page: this one stops, and only a new play takes it back
               r.blocked = true; r.drop(); if (owner === e) owner = null;
-              if (globalThis.KsfPauseHere) globalThis.KsfPauseHere("the bridge was taken by another page");
+              if (had && globalThis.KsfPauseHere) globalThis.KsfPauseHere("the bridge was taken by another page", e.el);   // only if it really had the bridge
             }
           }
         });

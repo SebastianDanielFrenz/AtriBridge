@@ -138,7 +138,7 @@ function connectInpageWs(me) {
 }
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "ksf-inpage") return;
-  if (inpage) { try { inpage.port.postMessage({ t: "replaced" }); inpage.port.disconnect(); } catch (e) {} closeInpage(); }
+  if (inpage) { try { inpage.port.postMessage({ t: "superseded" }); inpage.port.disconnect(); } catch (e) {} closeInpage(); }
   const me = { port, ws: null, rate: 48000, speakers: "", dead: false, replaced: false, retry: 0 };
   inpage = me;
   port.onMessage.addListener((m) => {

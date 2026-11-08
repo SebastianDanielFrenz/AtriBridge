@@ -51,8 +51,8 @@
     }
     return false;
   }
-  function pauseHere(why) {
-    const els = playingEls();
+  function pauseHere(why, only) {
+    const els = only ? (only.paused ? [] : [only]) : playingEls();
     if (!els.length) return;
     pausedByOtherAt = Date.now();
     console.info("[ksf-upmix] pausing here: " + why);
