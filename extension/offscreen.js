@@ -1,5 +1,6 @@
 // Holds the captured tab audio, the upmixer and (for heights) the connection to the KSF Spatial Bridge.
-import { speakersOf, needsBridge, DIRECT_ORDER } from "./layouts.js";
+import "./layouts.js";
+const { speakersOf, needsBridge, DIRECT_ORDER } = globalThis.KsfLayouts;
 
 const BRIDGE_URL = "ws://127.0.0.1:47321";
 let ctx = null, stream = null, node = null, ws = null, running = false, retry = null;

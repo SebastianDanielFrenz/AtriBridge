@@ -1,4 +1,5 @@
-import { LAYOUTS, needsBridge, speakersOf } from "./layouts.js";
+import "./layouts.js";
+const { LAYOUTS, needsBridge, speakersOf } = globalThis.KsfLayouts;
 
 const $ = (id) => document.getElementById(id);
 const sel = $("layout");
@@ -113,8 +114,8 @@ async function joinSite(tab, u) {
   if (!(await chrome.permissions.request({ origins: [origin] }))) return false;
   const id = "ksf-" + u.host;
   try { await chrome.scripting.unregisterContentScripts({ ids: [id] }); } catch (e) { /* not registered yet */ }
-  await chrome.scripting.registerContentScripts([{ id, matches: [origin], js: ["upmix-worklet.js", "pause-others.js", "inpage.js"], runAt: "document_idle", persistAcrossSessions: true }]);
-  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["upmix-worklet.js", "pause-others.js", "inpage.js"] }).catch(() => {});
+  await chrome.scripting.registerContentScripts([{ id, matches: [origin], js: ["layouts.js", "upmix-worklet.js", "pause-others.js", "inpage.js"], runAt: "document_idle", persistAcrossSessions: true }]);
+  await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["layouts.js", "upmix-worklet.js", "pause-others.js", "inpage.js"] }).catch(() => {});
   return true;
 }
 async function activeSite() {

@@ -129,3 +129,13 @@ chrome.commands.onCommand.addListener(async (cmd, tab) => {
     chrome.action.setBadgeText({ text: "", tabId: tab.id });
   }
 });
+
+// Sites the user added in the popup were registered with the script list of the version that added them; after an
+// update they get the current list.
+chrome.runtime.onInstalled.addListener(async () => {
+  try {
+    const reg = await chrome.scripting.getRegisteredContentScripts();
+    const ids = reg.filter((r) => r.id.startsWith("ksf-")).map((r) => r.id);
+    if (ids.length) await chrome.scripting.updateContentScripts(ids.map((id) => ({ id, js: ["layouts.js", "upmix-worklet.js", "pause-others.js", "inpage.js"] })));
+  } catch (e) { /* none registered */ }
+});

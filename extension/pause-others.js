@@ -5,6 +5,7 @@
   if (window.__ksfPauseOthers) return;
   window.__ksfPauseOthers = true;
   let enabled = true;
+  if (!chrome.storage) return;
   chrome.storage.local.get("pauseOthers").then((r) => { enabled = r.pauseOthers !== false; }).catch(() => {});
   chrome.storage.onChanged.addListener((c) => { if (c.pauseOthers) enabled = c.pauseOthers.newValue !== false; });
   function onPlaying(e) {

@@ -12,15 +12,11 @@
   const live = new Set();                        // entries, to rebuild them when the saved layout changes
   let cfg = { layout: null, style: "equal" };
   let suspended = false;                         // the tab is under capture: this route stays out of the way
-  let layouts = null;
+  const layouts = () => globalThis.KsfLayouts;     // layouts.js is the first content script
 
   async function loadCfg() {
     const st = await chrome.storage.local.get(["sites", "style"]);
     cfg = { layout: (st.sites || {})[location.host] || null, style: st.style || "equal" };
-  }
-  async function getLayouts() {
-    if (!layouts) layouts = await import(chrome.runtime.getURL("layouts.js"));
-    return layouts;
   }
 
   function b64(i16) {
@@ -68,7 +64,8 @@
   }
 
   async function build(e) {
-    const L = await getLayouts();
+    const L = layouts();
+    if (!L) throw new Error("layouts.js was not loaded in this page (reload the tab)");
     teardown(e);
     if (suspended) { e.pass.gain.value = 1; return; }
     if (!cfg.layout || !L.LAYOUTS.includes(cfg.layout)) { e.pass.gain.value = 1; return; }     // no rule: plain output
