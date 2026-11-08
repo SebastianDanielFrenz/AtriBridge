@@ -11,6 +11,7 @@
   const entries = new WeakMap();                 // element -> entry
   const live = new Set();                        // entries, to rebuild them when the saved layout changes
   let cfg = { layout: null, style: "equal" };
+  let suspended = false;                         // the tab is under capture: this route stays out of the way
   let layouts = null;
 
   async function loadCfg() {
@@ -69,6 +70,7 @@
   async function build(e) {
     const L = await getLayouts();
     teardown(e);
+    if (suspended) { e.pass.gain.value = 1; return; }
     if (!cfg.layout || !L.LAYOUTS.includes(cfg.layout)) { e.pass.gain.value = 1; return; }     // no rule: plain output
     const bridge = L.needsBridge(cfg.layout);
     let speakers, ch = 2;
@@ -159,7 +161,7 @@
   }
 
   function consider(el) {
-    if (!cfg.layout || !(el instanceof HTMLMediaElement) || el.muted || el.volume === 0) return;
+    if (!cfg.layout || suspended || !(el instanceof HTMLMediaElement) || el.muted || el.volume === 0) return;
     if (!chrome.runtime || !chrome.runtime.id) return;
     attach(el);
   }
@@ -167,6 +169,12 @@
   document.addEventListener("playing", onPlay, true);
   document.addEventListener("play", onPlay, true);
 
+  chrome.runtime.onMessage.addListener((m) => {
+    if (m.type !== "ksf-inpage") return;
+    suspended = !!m.suspended;
+    for (const e of live) build(e).catch(() => { e.pass.gain.value = 1; });
+    if (!suspended && cfg.layout) for (const el of document.querySelectorAll("audio, video")) if (!el.paused) consider(el);
+  });
   chrome.storage.onChanged.addListener(async (c) => {
     if (!c.sites && !c.style) return;
     await loadCfg();

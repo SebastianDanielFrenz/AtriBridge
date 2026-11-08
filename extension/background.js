@@ -21,12 +21,18 @@ async function start(tabId, layout) {
   await ensureOffscreen();
   const style = (await chrome.storage.local.get("style")).style || "equal";
   const r = await chrome.runtime.sendMessage({ target: "offscreen", cmd: "start", streamId, layout, style });
-  if (r && r.ok) setCaptured(tabId);
+  if (r && r.ok) { setCaptured(tabId); inpageSuspend(tabId, true); }      // the capture takes the tab: the in-page upmix steps aside
   return r;
 }
 
+// One route at a time per tab: a tab under capture must not also relay its own in-page upmix to the bridge (two
+// sockets taking the bridge from each other: audio drops).
+function inpageSuspend(tabId, on) { if (tabId != null) chrome.tabs.sendMessage(tabId, { type: "ksf-inpage", suspended: on }).catch(() => {}); }
+
 async function stop() {
+  const was = capturedTab;
   setCaptured(null);
+  inpageSuspend(was, false);
   if (await chrome.offscreen.hasDocument()) {
     await chrome.runtime.sendMessage({ target: "offscreen", cmd: "stop" }).catch(() => {});
     await chrome.offscreen.closeDocument().catch(() => {});
