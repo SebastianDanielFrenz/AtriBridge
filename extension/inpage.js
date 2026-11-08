@@ -50,7 +50,10 @@
           if (m.t === "info") { r.live = true; e.setBridge(true); }
           else if (m.t === "gone" || m.t === "closed" || m.t === "replaced") {
             r.live = false; e.setBridge(false);
-            if (m.t === "replaced") { r.blocked = true; r.drop(); if (owner === e) owner = null; }    // not taken back by itself: that was the fight
+            if (m.t === "replaced") {                // the bridge went to another page: this one stops, and only a new play takes it back
+              r.blocked = true; r.drop(); if (owner === e) owner = null;
+              if (globalThis.KsfPauseHere) globalThis.KsfPauseHere("the bridge was taken by another page");
+            }
           }
         });
         port.onDisconnect.addListener(() => { if (port === mine) { port = null; r.live = false; e.setBridge(false); } });

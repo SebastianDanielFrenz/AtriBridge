@@ -65,6 +65,10 @@ chrome.runtime.onMessage.addListener((m, _sender, reply) => {
   }
 });
 
+chrome.runtime.onMessage.addListener((m) => {
+  if (m.type !== "ksf-bridge-taken") return;
+  capturedReady.then(() => { if (capturedTab != null) chrome.tabs.sendMessage(capturedTab, { type: "ksf-pause-forced" }).catch(() => {}); });
+});
 chrome.tabs.onRemoved.addListener(async (id) => { await capturedReady; if (id === capturedTab) stop(); });
 
 // A tab that starts playing pauses every other taking-part tab (the content script of each one acts on it).

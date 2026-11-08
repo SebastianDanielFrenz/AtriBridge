@@ -51,16 +51,21 @@
     }
     return false;
   }
-  chrome.runtime.onMessage.addListener((m) => {
-    if (m.type !== "ksf-pause" || !enabled) return;
+  function pauseHere(why) {
     const els = playingEls();
     if (!els.length) return;
     pausedByOtherAt = Date.now();
-    console.info("[ksf-upmix] pausing here: " + (m.from || "another tab") + " started playing");
+    console.info("[ksf-upmix] pausing here: " + why);
     if (YT && pressYoutubePlayButton()) {
       setTimeout(() => { for (const el of playingEls()) el.pause(); }, 600);
     } else {
       for (const el of els) el.pause();
     }
+  }
+  globalThis.KsfPauseHere = pauseHere;            // inpage.js: this page lost the bridge, so it stops
+  chrome.runtime.onMessage.addListener((m) => {
+    if (m.type === "ksf-pause-forced") { pauseHere("the bridge was taken by another page"); return; }   // not subject to the setting
+    if (m.type !== "ksf-pause" || !enabled) return;
+    pauseHere((m.from || "another tab") + " started playing");
   });
 })();

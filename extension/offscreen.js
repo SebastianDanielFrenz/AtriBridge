@@ -15,7 +15,7 @@ function setStatus(patch) {
 
 async function start({ streamId, layout, style }) {
   await stop(true);
-  replaced = false;
+  replaced = false; openAt = 0;
   const bridge = needsBridge(layout);
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { mandatory: { chromeMediaSource: "tab", chromeMediaSourceId: streamId } },
@@ -81,6 +81,7 @@ function connectBridge(speakers) {
       });
     } else if (m.type === "replaced") {          // another page or tab took the app: do not take it back in a loop
       replaced = true;
+      chrome.runtime.sendMessage({ type: "ksf-bridge-taken" }).catch(() => {});      // the captured tab pauses
       setStatus({ bridgeState: "taken", warn: "The bridge is in use by another page. Press Start again to take it back." });
     } else if (m.type === "gone") {
       setStatus({ bridgeState: "nospatial", warn: "Turn on Windows Spatial Sound (Dolby Atmos / Windows Sonic) for the default output." });
@@ -88,7 +89,7 @@ function connectBridge(speakers) {
   };
   ws.onclose = () => {
     if (!running || replaced) return;
-    if (Date.now() - openAt < 4000) { if (++shortLives >= 2) { replaced = true; setStatus({ bridgeState: "taken", warn: "The bridge keeps being taken by another page. Press Start again to take it back." }); return; } } else shortLives = 0;
+    if (openAt) { replaced = true; setStatus({ bridgeState: "taken", warn: "The bridge connection ended. Press Start again to take it back." }); return; }   // it was up: no re-claiming, the user starts it again
     setStatus({ bridgeState: "missing" });
     retry = setTimeout(() => connectBridge(speakers), 2000);
   };
@@ -125,8 +126,9 @@ function connectInpageWs(me) {
   };
   ws.onclose = () => {
     if (me.dead || me.replaced) return;
-    if (Date.now() - (me.openAt || 0) < 4000) me.short = (me.short || 0) + 1; else me.short = 0;
-    if (me.short >= 2) { me.replaced = true; try { me.port.postMessage({ t: "replaced" }); } catch (err) {} return; }
+    // once it was up, a loss means another client has it (or the app quit): the page stops, no re-claiming; only
+    // "the app is not there yet" is retried
+    if (me.openAt) { me.replaced = true; try { me.port.postMessage({ t: "replaced" }); } catch (err) {} return; }
     try { me.port.postMessage({ t: "closed" }); } catch (err) {}
     me.retry = setTimeout(() => connectInpageWs(me), 2000);
   };
