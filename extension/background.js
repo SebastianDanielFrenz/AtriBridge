@@ -92,6 +92,28 @@ async function autoUpmix(tab) {
   if (!r || !r.ok) {
     chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
     chrome.action.setBadgeText({ text: "!", tabId: tab.id });
-    chrome.action.setTitle({ title: "Auto-upmix failed: " + ((r && r.error) || "unknown") + ". Click the icon and press Upmix this tab.", tabId: tab.id });
+    chrome.action.setTitle({ title: "Auto-upmix needs one click per tab: Chrome only allows capturing a tab after you invoked the extension on it. Press Alt+Shift+U on this tab (or open the popup once). Chrome said: " + ((r && r.error) || "unknown"), tabId: tab.id });
   }
 }
+
+// Alt+Shift+U (change it at chrome://extensions/shortcuts): Chrome counts a shortcut as invoking the extension on the
+// tab, which is what allows capturing it. Upmixes the active tab with its site's saved layout, or stops it.
+chrome.commands.onCommand.addListener(async (cmd, tab) => {
+  if (cmd !== "toggle-upmix") return;
+  await capturedReady;
+  if (!tab) [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tab) return;
+  if (tab.id === capturedTab) { await stop(); return; }
+  let host = "";
+  try { host = new URL(tab.url).host; } catch (e) { /* no url */ }
+  const st = await chrome.storage.local.get(["sites", "layout"]);
+  const layout = (st.sites || {})[host] || st.layout || "7.0";
+  const r = await start(tab.id, layout).catch((e) => ({ ok: false, error: String((e && e.message) || e) }));
+  if (!r || !r.ok) {
+    chrome.action.setBadgeBackgroundColor({ color: "#ef4444" });
+    chrome.action.setBadgeText({ text: "!", tabId: tab.id });
+    chrome.action.setTitle({ title: "Could not upmix: " + ((r && r.error) || "unknown"), tabId: tab.id });
+  } else {
+    chrome.action.setBadgeText({ text: "", tabId: tab.id });
+  }
+});

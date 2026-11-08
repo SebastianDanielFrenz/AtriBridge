@@ -111,6 +111,9 @@ async function saveRule() {
     if (!(await joinSite(a.tab, a.u))) { $("siteRule").checked = false; $("siteHint").textContent = "Access was not granted."; return; }
     sites[a.u.host] = sel.value;
     $("siteHint").textContent = a.u.host + ": always " + sel.value + ".";
+    // The popup counts as invoking the extension on this tab, so the upmix can start right now; later plays in the
+    // same tab restart it by themselves. A new tab needs one invocation again: Alt+Shift+U or this popup.
+    if (!running) chrome.runtime.sendMessage({ cmd: "start", tabId: a.tab.id, layout: sel.value }).then((r) => { if (r && !r.ok) $("state").textContent = "Could not start: " + (r.error || "unknown"); }).catch(() => {});
   } else {
     delete sites[a.u.host];
     $("siteHint").textContent = a.u.host + ": upmix only when started by hand.";

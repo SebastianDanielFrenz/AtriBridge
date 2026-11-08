@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KSF Surround Upmix",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "Upmixes the audio of a tab (YouTube, YouTube Music, anything) to 5.0 / 7.0 / 9.0, or with the KSF Spatial Bridge to 5.0.2 ... 9.0.6. Also pauses the other music tabs when one starts.",
   "minimum_chrome_version": "116",
   "permissions": [
@@ -34,5 +34,13 @@
       ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "commands": {
+    "toggle-upmix": {
+      "suggested_key": {
+        "default": "Alt+Shift+U"
+      },
+      "description": "Upmix this tab (or stop), with the saved layout of its site"
+    }
+  }
 }
