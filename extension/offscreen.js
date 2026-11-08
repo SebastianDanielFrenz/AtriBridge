@@ -114,7 +114,9 @@ function connectInpageWs(me) {
   const ws = new WebSocket(BRIDGE_URL);
   me.ws = ws;
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => { me.openAt = Date.now(); ws.send(JSON.stringify({ type: "hello", rate: me.rate, speakers: me.speakers })); };
+  const say = (s) => { try { me.port.postMessage({ t: "ws", s }); } catch (err) { /* page gone */ } };
+  say("connecting to the bridge socket");
+  ws.onopen = () => { me.openAt = Date.now(); say("socket open, waiting for the bridge's answer"); ws.send(JSON.stringify({ type: "hello", rate: me.rate, speakers: me.speakers })); };
   ws.onmessage = (e) => {
     if (typeof e.data !== "string") return;
     let m;
@@ -134,7 +136,7 @@ function connectInpageWs(me) {
     try { me.port.postMessage({ t: "closed" }); } catch (err) {}
     me.retry = setTimeout(() => connectInpageWs(me), 2000);
   };
-  ws.onerror = () => {};
+  ws.onerror = () => say("socket error (bridge not reachable)");
 }
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "ksf-inpage") return;

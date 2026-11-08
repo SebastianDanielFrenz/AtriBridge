@@ -70,7 +70,7 @@ function renderPage() {
       else if (p.live) line += " - bridge connected";
       else if (p.route === "closed") line += " - the bridge app does not answer on port 47321 (running? firewall?)";
       else if (p.route === "gone") line += " - the bridge says Windows Spatial Sound is not available on the default output";
-      else line += " - connecting to the bridge...";
+      else line += " - connecting to the bridge..." + (p.step ? " (" + p.step + ")" : "");
     }
   }
   $("state").textContent = line;

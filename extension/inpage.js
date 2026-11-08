@@ -39,15 +39,21 @@
         if (port || r.opening || r.blocked) return;
         r.opening = true;
         // the offscreen page that holds the socket may not exist yet
-        try { await chrome.runtime.sendMessage({ type: "ksf-ensure-offscreen" }); } catch (err) { r.opening = false; return; }
+        r.step = "asking the extension for its audio page";
+        try {
+          const rep = await chrome.runtime.sendMessage({ type: "ksf-ensure-offscreen" });
+          if (!rep || !rep.ok) r.step = "the extension could not create its audio page";
+        } catch (err) { r.opening = false; r.step = "no answer from the extension: " + String((err && err.message) || err); return; }
         r.opening = false;
         if (port || e.route !== r) return;
         try {
           port = chrome.runtime.connect({ name: "ksf-inpage" });
         } catch (err) { port = null; return; }
         const mine = port;
+        r.step = "port open, waiting for the audio page";
         port.onMessage.addListener((m) => {
           if (port !== mine) return;
+          if (m.t === "ws") { r.step = m.s; return; }
           if (m.t === "info") { r.live = true; r.wasLive = true; r.state = "live"; e.setBridge(true); }
           else if (m.t === "superseded") { r.blocked = true; r.live = false; r.state = "taken"; e.setBridge(false); r.drop(); if (owner === e) owner = null; }   // another route of THIS page took it: no pause
           else if (m.t === "gone" || m.t === "closed" || m.t === "replaced") {
@@ -59,7 +65,7 @@
             }
           }
         });
-        port.onDisconnect.addListener(() => { if (port === mine) { port = null; r.live = false; e.setBridge(false); } });
+        port.onDisconnect.addListener(() => { if (port === mine) { port = null; r.live = false; if (!r.live && r.state === "connecting") r.step = "the extension's audio page closed the port (reload the extension?)"; e.setBridge(false); } });
         port.postMessage({ t: "open", rate: e.ctx.sampleRate, speakers: e.speakers.join(",") });
       },
       send(f32) {
@@ -202,6 +208,7 @@
       ctxRunning: src.length ? src.some((e) => e.ctx.state === "running") : null,
       live: src.some((e) => e.route && e.route.live),
       route: (src.find((e) => e.route) || { route: { state: "" } }).route.state,
+      step: (src.find((e) => e.route) || { route: { step: "" } }).route.step || "",
       blocked: src.some((e) => e.route && e.route.blocked),
       how: src.length ? src[0].how : "",
     };
