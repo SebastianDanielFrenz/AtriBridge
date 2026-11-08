@@ -62,11 +62,12 @@ async function start({ streamId, layout, style }) {
   setStatus({ state: "running", layout, bridge, note, warn: "", error: "", channels: speakers.length, bridgeState: bridge ? "connecting" : "off" });
 }
 
+let openAt = 0, shortLives = 0;
 function connectBridge(speakers) {
   if (!running) return;
   ws = new WebSocket(BRIDGE_URL);
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => ws.send(JSON.stringify({ type: "hello", rate: 48000, speakers: speakers.join(",") }));
+  ws.onopen = () => { openAt = Date.now(); ws.send(JSON.stringify({ type: "hello", rate: 48000, speakers: speakers.join(",") })); };
   ws.onmessage = (e) => {
     if (typeof e.data !== "string") return;
     let m;
@@ -87,6 +88,7 @@ function connectBridge(speakers) {
   };
   ws.onclose = () => {
     if (!running || replaced) return;
+    if (Date.now() - openAt < 4000) { if (++shortLives >= 2) { replaced = true; setStatus({ bridgeState: "taken", warn: "The bridge keeps being taken by another page. Press Start again to take it back." }); return; } } else shortLives = 0;
     setStatus({ bridgeState: "missing" });
     retry = setTimeout(() => connectBridge(speakers), 2000);
   };
@@ -109,7 +111,7 @@ function connectInpageWs(me) {
   const ws = new WebSocket(BRIDGE_URL);
   me.ws = ws;
   ws.binaryType = "arraybuffer";
-  ws.onopen = () => ws.send(JSON.stringify({ type: "hello", rate: me.rate, speakers: me.speakers }));
+  ws.onopen = () => { me.openAt = Date.now(); ws.send(JSON.stringify({ type: "hello", rate: me.rate, speakers: me.speakers })); };
   ws.onmessage = (e) => {
     if (typeof e.data !== "string") return;
     let m;
@@ -123,6 +125,8 @@ function connectInpageWs(me) {
   };
   ws.onclose = () => {
     if (me.dead || me.replaced) return;
+    if (Date.now() - (me.openAt || 0) < 4000) me.short = (me.short || 0) + 1; else me.short = 0;
+    if (me.short >= 2) { me.replaced = true; try { me.port.postMessage({ t: "replaced" }); } catch (err) {} return; }
     try { me.port.postMessage({ t: "closed" }); } catch (err) {}
     me.retry = setTimeout(() => connectInpageWs(me), 2000);
   };
