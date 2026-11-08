@@ -2,20 +2,43 @@ import { LAYOUTS, needsBridge, speakersOf } from "./layouts.js";
 
 const $ = (id) => document.getElementById(id);
 const sel = $("layout");
-const groups = [
-  ["Browser output (no bridge)", LAYOUTS.filter((l) => !needsBridge(l))],
-  ["With the KSF Spatial Bridge", LAYOUTS.filter(needsBridge)],
-];
-for (const [label, list] of groups) {
-  const og = document.createElement("optgroup");
-  og.label = label;
-  for (const l of list) {
-    const o = document.createElement("option");
-    o.value = l;
-    o.textContent = l;
-    og.appendChild(o);
+// Only layouts this system can actually drive are offered:
+//  - browser output: 5.0 needs 6 device channels, 7.0 needs 8 (probed here, like the music page does);
+//  - with the bridge: the bed the bridge last reported ("7.1.4" = 7 ear-level speakers and 4 heights); before it has
+//    ever reported, a 7.1.4 Atmos bed is assumed.
+let canUse = () => true;
+async function probeCapabilities() {
+  let maxCh = 2;
+  try { const c = new AudioContext(); maxCh = c.destination.maxChannelCount || 2; c.close().catch(() => {}); } catch (e) { /* no audio */ }
+  const dev = (await chrome.storage.local.get("device")).device;
+  let ear = 7, tops = 4;
+  const m = dev && /^(\d+)\.\d+\.(\d+)$/.exec(String(dev.bed || ""));
+  if (m) { ear = +m[1]; tops = +m[2]; }
+  canUse = (l) => {
+    const [a, , h] = l.split(".");
+    const base = +a;
+    if (!needsBridge(l)) return base === 5 ? maxCh >= 6 : base === 7 ? maxCh >= 8 : false;
+    return base <= ear && +h <= tops;
+  };
+}
+function fillLayouts() {
+  sel.textContent = "";
+  const groups = [
+    ["Browser output (no bridge)", LAYOUTS.filter((l) => !needsBridge(l) && canUse(l))],
+    ["With the KSF Spatial Bridge", LAYOUTS.filter((l) => needsBridge(l) && canUse(l))],
+  ];
+  for (const [label, list] of groups) {
+    if (!list.length) continue;
+    const og = document.createElement("optgroup");
+    og.label = label;
+    for (const l of list) {
+      const o = document.createElement("option");
+      o.value = l;
+      o.textContent = l;
+      og.appendChild(o);
+    }
+    sel.appendChild(og);
   }
-  sel.appendChild(og);
 }
 let running = false;
 
@@ -48,8 +71,10 @@ function show(st) {
 }
 
 async function init() {
+  await probeCapabilities();
+  fillLayouts();
   const saved = (await chrome.storage.local.get("layout")).layout;
-  sel.value = saved && LAYOUTS.includes(saved) ? saved : "7.0";
+  sel.value = saved && LAYOUTS.includes(saved) && canUse(saved) ? saved : (sel.options[0] ? sel.options[0].value : "");
   hint();
   $("style").value = (await chrome.storage.local.get("style")).style || "equal";
   $("pauseOthers").checked = (await chrome.storage.local.get("pauseOthers")).pauseOthers !== false;
@@ -132,7 +157,7 @@ async function showRule() {
   if (!a) { $("siteRule").disabled = true; return; }
   $("siteRuleText").textContent = "Always upmix " + a.u.host + " with this layout";
   const sites = (await chrome.storage.local.get("sites")).sites || {};
-  if (sites[a.u.host] && LAYOUTS.includes(sites[a.u.host])) { $("siteRule").checked = true; sel.value = sites[a.u.host]; hint(); }
+  if (sites[a.u.host] && LAYOUTS.includes(sites[a.u.host]) && canUse(sites[a.u.host])) { $("siteRule").checked = true; sel.value = sites[a.u.host]; hint(); }
 }
 chrome.runtime.onMessage.addListener((m) => { if (m.type === "status") show(m.status); });
 $("version").textContent = "v" + chrome.runtime.getManifest().version;

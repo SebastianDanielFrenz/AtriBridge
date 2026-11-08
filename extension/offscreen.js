@@ -71,6 +71,7 @@ function connectBridge(speakers) {
     let m;
     try { m = JSON.parse(e.data); } catch (err) { return; }
     if (m.type === "info") {
+      chrome.storage.local.set({ device: { bed: m.bed, objects: m.objects || 0, name: m.device, t: Date.now() } }).catch(() => {});
       const need = speakers.length, have = m.objects || 0;
       setStatus({
         bridgeState: "ok", device: m.device, bed: m.bed, objects: have,
@@ -112,7 +113,10 @@ function connectInpageWs(me) {
     if (typeof e.data !== "string") return;
     let m;
     try { m = JSON.parse(e.data); } catch (err) { return; }
-    if (m.type === "info") me.port.postMessage({ t: "info" });
+    if (m.type === "info") {
+      chrome.storage.local.set({ device: { bed: m.bed, objects: m.objects || 0, name: m.device, t: Date.now() } }).catch(() => {});
+      me.port.postMessage({ t: "info" });
+    }
     else if (m.type === "gone") me.port.postMessage({ t: "gone" });
     else if (m.type === "replaced") { me.replaced = true; me.port.postMessage({ t: "replaced" }); }
   };
