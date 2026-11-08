@@ -36,6 +36,11 @@ chrome.runtime.onMessage.addListener((m, _sender, reply) => {
     stop().then(() => reply({ ok: true }));
     return true;
   }
+  if (m.cmd === "restart") {                 // layout or style changed in the popup while a tab is being upmixed
+    if (capturedTab == null) { reply({ ok: false }); return true; }
+    start(capturedTab, m.layout).then(reply, (e) => reply({ ok: false, error: String((e && e.message) || e) }));
+    return true;
+  }
   if (m.cmd === "status") {
     chrome.offscreen.hasDocument().then(async (has) => {
       if (!has) return reply({ state: "idle" });

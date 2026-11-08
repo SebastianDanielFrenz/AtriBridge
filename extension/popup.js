@@ -44,7 +44,7 @@ function show(st) {
   const w = [st && st.note, st && st.warn].filter(Boolean).join(" ");
   $("warn").hidden = !w;
   $("warn").textContent = w;
-  if (running && st.layout) { sel.value = st.layout; hint(); }
+  if (running && st.layout && Date.now() - userPicked > 3000) { sel.value = st.layout; hint(); }   // (not while the user is choosing)
 }
 
 async function init() {
@@ -56,7 +56,10 @@ async function init() {
   show(await chrome.runtime.sendMessage({ cmd: "status" }).catch(() => ({ state: "idle" })));
 }
 
-sel.addEventListener("change", hint);
+let userPicked = 0;
+sel.addEventListener("change", () => { hint(); userPicked = Date.now(); chrome.storage.local.set({ layout: sel.value }); restartIfRunning(); });
+// Changing the layout or style while a tab is being upmixed restarts the upmix with the new one.
+function restartIfRunning() { if (running) chrome.runtime.sendMessage({ cmd: "restart", layout: sel.value }).catch(() => {}); }
 $("go").addEventListener("click", async () => {
   if (running) {
     await chrome.runtime.sendMessage({ cmd: "stop" });
@@ -68,7 +71,7 @@ $("go").addEventListener("click", async () => {
   const r = await chrome.runtime.sendMessage({ cmd: "start", tabId: tab.id, layout: sel.value });
   if (!r || !r.ok) show({ state: "idle", error: r && r.error });
 });
-$("style").addEventListener("change", () => chrome.storage.local.set({ style: $("style").value }));   // applies at the next start
+$("style").addEventListener("change", async () => { await chrome.storage.local.set({ style: $("style").value }); restartIfRunning(); });
 $("pauseOthers").addEventListener("change", () => chrome.storage.local.set({ pauseOthers: $("pauseOthers").checked }));
 // Lets the current tab's site take part (asks Chrome for access to it, then injects the script there).
 async function joinSite(tab, u) {
