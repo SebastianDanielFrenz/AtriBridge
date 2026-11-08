@@ -11,4 +11,4 @@ hr { margin: 14px 0 10px; border: 0; border-top: 1px solid color-mix(in srgb, Gr
 label.check { display: flex; gap: 8px; align-items: flex-start; color: inherit; }
 label.check input { margin-top: 3px; }
 button.secondary { background: transparent; color: inherit; border: 1px solid color-mix(in srgb, GrayText 50%, transparent); font-weight: 500; margin-top: 8px; }
-.version { margin: 12px 0 0; font-size: 11px; color: GrayText; text-align: right; }
+.version { margin: 8px 0 0; font-size: 10px; line-height: 1.2; color: GrayText; opacity: .6; text-align: right; }
