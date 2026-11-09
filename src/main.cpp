@@ -102,7 +102,7 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
-constexpr const char *kVersion = "1.2.4";      // must equal --version given to tools/publish.py for this build
+constexpr const char *kVersion = "1.2.5";      // must equal --version given to tools/publish.py for this build
 // Where updates come from when nothing else is configured. Replace with your own server or GitHub repository
 // (--update-url / --update-github / spatial-bridge.conf).
 constexpr const char *kDefaultUpdateSource = "https://media-dl.ksfhost.de/api/public/spatial-bridge/latest.json";
@@ -764,6 +764,14 @@ bool run_spatial_once() {
     hr = client->GetNativeStaticObjectTypeMask(&native);
     if (FAILED(hr)) return false;
     std::string name = "default output";
+    // The stream stays on the device it was opened on; when the user (or Steam Remote Play) changes the Windows default
+    // output, the old device still exists and keeps accepting audio, so nothing would tell us. Remember the id and
+    // compare it with the current default once a second below.
+    std::wstring dev_id;
+    {
+        LPWSTR id = nullptr;
+        if (SUCCEEDED(dev->GetId(&id)) && id) { dev_id = id; CoTaskMemFree(id); }
+    }
     {
         ComPtr<IPropertyStore> ps;
         if (SUCCEEDED(dev->OpenPropertyStore(STGM_READ, &ps))) {
@@ -837,6 +845,20 @@ bool run_spatial_once() {
             if (g_quit) break;
             hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
             break;
+        }
+        {
+            static thread_local DWORD last_dev_check = 0;
+            const DWORD now = GetTickCount();
+            if (!dev_id.empty() && now - last_dev_check >= 1000) {
+                last_dev_check = now;
+                ComPtr<IMMDevice> cur;
+                LPWSTR cid = nullptr;
+                if (SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eMultimedia, &cur)) && SUCCEEDED(cur->GetId(&cid)) && cid) {
+                    const bool changed = dev_id != cid;
+                    CoTaskMemFree(cid);
+                    if (changed) { hr = S_OK; break; }          // the caller reopens on the new default
+                }
+            }
         }
         UINT32 avail = 0, frames = 0;
         {

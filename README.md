@@ -21,6 +21,9 @@ music page --(ws://127.0.0.1:47321, float32 stereo)--> ksf-spatial-bridge --(ISp
 3. Open the music page. The output button in the player bar changes to e.g. `7.1.4 all`; while the
    app is connected the browser's own output is silent and the app plays.
 
+The app follows the Windows default output: when you switch it (or Steam Remote Play does), the stream reopens on the new
+device within a second (before 1.2.5 it kept playing into the old one, silently).
+
 The app listens on `127.0.0.1` only and accepts connections from `https://media-dl.ksfhost.de`,
 `https://music.ksfhost.de` and localhost pages (add more with `--origin URL`).
 
