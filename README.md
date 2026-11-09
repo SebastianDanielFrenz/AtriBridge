@@ -59,7 +59,8 @@ update=off            # never check on its own (the tray item still works)
 ```
 
 `--no-update` does the same for one run. With no source given the built-in default (`kDefaultUpdateSource` in
-`src/main.cpp`) is used: change it before building your own copy.
+`src/main.cpp`) is used: the GitHub releases of this repository (`SebastianDanielFrenz/AtriBridge`; up to 1.2.5 it was
+the AtriHord server). Change it before building your own copy.
 
 **Safety.** HTTPS only, and an update is installed only if the exe's SHA-256 matches the manifest *and* the
 manifest's ECDSA P-256 signature verifies against the public key compiled into the app (`src/update_pubkey.h`).
@@ -89,9 +90,10 @@ Full checklist (what was done for v1.2.4, repo `SebastianDanielFrenz/AtriBridge`
    `releases/latest/download/latest.json`. Check that URL answers 200 afterwards. An extension-only release (same
    bridge) uses a tag like `ext-A.B.C` and still attaches the unchanged exe and `latest.json`, because
    `releases/latest/` points at the newest release and must always find all three files.
-5. The AtriHord server (media-dl.ksfhost.de, the built-in default source): copy `latest.json` + the exe into
-   `web_files/app/spatial-bridge/` of the AtriHord deployment. The exe is not in the AtriHord repo, so a `git pull`
-   there never delivers it.
+5. The AtriHord server (media-dl.ksfhost.de) is no longer an update source of the default build (1.2.6 and later read
+   GitHub), but its `web_files/app/spatial-bridge/` still serves the music page's "Spatial app" download and the
+   copies up to 1.2.5, which update from it: copy `latest.json` + the exe there too. The exe is not in the AtriHord repo,
+   so a `git pull` there never delivers it.
 6. The extension has no update channel: users download the zip from the release, unzip and Load unpacked again
    (or press reload on the extension card when the folder was replaced in place).
 

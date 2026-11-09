@@ -102,10 +102,10 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
-constexpr const char *kVersion = "1.2.5";      // must equal --version given to tools/publish.py for this build
-// Where updates come from when nothing else is configured. Replace with your own server or GitHub repository
-// (--update-url / --update-github / spatial-bridge.conf).
-constexpr const char *kDefaultUpdateSource = "https://media-dl.ksfhost.de/api/public/spatial-bridge/latest.json";
+constexpr const char *kVersion = "1.2.6";      // must equal --version given to tools/publish.py for this build
+// Where updates come from when nothing else is configured: the GitHub releases of this project (up to 1.2.5 it was the
+// AtriHord server). Own server or repository: --update-url / --update-github / spatial-bridge.conf.
+constexpr const char *kDefaultUpdateSource = "https://github.com/SebastianDanielFrenz/AtriBridge/releases/latest/download/latest.json";
 std::vector<std::string> g_update_sources;      // manifest addresses, tried in order
 std::atomic<bool> g_auto_update{true};
 HANDLE g_update_now = nullptr;                  // event: "check now" (tray menu)
