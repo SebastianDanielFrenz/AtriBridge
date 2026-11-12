@@ -8,10 +8,35 @@ const sel = $("layout");
 //  - with the bridge: the bed the bridge last reported ("7.1.4" = 7 ear-level speakers and 4 heights); before it has
 //    ever reported, a 7.1.4 Atmos bed is assumed.
 let canUse = () => true;
+function probeBridge(dev) {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String((dev && dev.version) || ""));
+  if (!m || !(+m[1] > 1 || +m[2] > 2 || (+m[2] === 2 && +m[3] >= 7))) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let ws, done = false;
+    const end = (v) => { if (done) return; done = true; try { ws && ws.close(); } catch (e) { /* closed */ } resolve(v); };
+    try {
+      ws = new WebSocket("ws://127.0.0.1:47321/probe");
+      ws.onmessage = (e) => {
+        try {
+          const j = JSON.parse(e.data);
+          end(j.type === "info" ? { bed: j.bed, objects: j.objects || 0, name: j.device, version: j.version || "", t: Date.now() } : null);
+        } catch (err) { end(null); }
+      };
+      ws.onerror = () => end(null);
+      ws.onclose = () => end(null);
+    } catch (e) { end(null); }
+    setTimeout(() => end(null), 1200);
+  });
+}
 async function probeCapabilities() {
   let maxCh = 2;
   try { const c = new AudioContext(); maxCh = c.destination.maxChannelCount || 2; c.close().catch(() => {}); } catch (e) { /* no audio */ }
-  const dev = (await chrome.storage.local.get("device")).device;
+  let dev = (await chrome.storage.local.get("device")).device;
+  // Bridge 1.2.7+ answers a passive probe (ws .../probe) without taking the bridge from whoever is playing, so the list
+  // follows the device as it is now. Older bridges treat any connection as a takeover: never probed (the version is
+  // known from the last real connection). The stored value stays the fallback.
+  const fresh = await probeBridge(dev);
+  if (fresh) { dev = fresh; chrome.storage.local.set({ device: fresh }).catch(() => {}); }
   let ear = 7, tops = 4;
   const m = dev && /^(\d+)\.\d+\.(\d+)$/.exec(String(dev.bed || ""));
   if (m) { ear = +m[1]; tops = +m[2]; }
@@ -112,7 +137,8 @@ async function init() {
   const saved = (await chrome.storage.local.get("layout")).layout;
   sel.value = saved && LAYOUTS.includes(saved) && canUse(saved) ? saved : (sel.options[0] ? sel.options[0].value : "");
   hint();
-  $("pauseOthers").checked = (await chrome.storage.local.get("pauseOthers")).pauseOthers !== false;
+  // One switch: on = this site takes part (its script is there) and the other tabs are paused when it starts playing.
+  $("pauseOthers").checked = (await chrome.storage.local.get("pauseOthers")).pauseOthers !== false && (await sitePlays());
   show(await chrome.runtime.sendMessage({ cmd: "status" }).catch(() => ({ state: "idle" })));
   await refreshPage();
   setInterval(refreshPage, 1000);
@@ -149,7 +175,21 @@ $("go").addEventListener("click", async () => {
   const r = await chrome.runtime.sendMessage({ cmd: "start", tabId: tab.id, layout: sel.value });
   if (!r || !r.ok) show({ state: "idle", error: r && r.error });
 });
-$("pauseOthers").addEventListener("change", () => chrome.storage.local.set({ pauseOthers: $("pauseOthers").checked }));
+// Does a script of this extension already run in the active tab (built-in sites, or one added earlier)?
+async function sitePlays() {
+  const a = await activeSite();
+  if (!a) return true;
+  return !!(await chrome.tabs.sendMessage(a.tab.id, { type: "ksf-inpage-status" }).catch(() => null));
+}
+$("pauseOthers").addEventListener("change", async () => {
+  const on = $("pauseOthers").checked;
+  if (on && !(await sitePlays())) {
+    const a = await activeSite();
+    if (!a) { $("pauseOthers").checked = false; $("siteHint").textContent = "This page cannot take part."; return; }
+    if (!(await joinSite(a.tab, a.u))) { $("pauseOthers").checked = false; $("siteHint").textContent = "Access was not granted."; return; }
+  }
+  chrome.storage.local.set({ pauseOthers: on });
+});
 // Lets the current tab's site take part (asks Chrome for access to it, then injects the script there).
 async function joinSite(tab, u) {
   const origin = u.origin + "/*";
@@ -165,11 +205,6 @@ async function activeSite() {
   try { const u = new URL(tab.url); if (/^https?:$/.test(u.protocol)) return { tab, u }; } catch (e) { /* no page */ }
   return null;
 }
-$("addSite").addEventListener("click", async () => {
-  const a = await activeSite();
-  if (!a) { $("siteHint").textContent = "This page cannot take part."; return; }
-  $("siteHint").textContent = (await joinSite(a.tab, a.u)) ? a.u.host + " now takes part." : "Access was not granted.";
-});
 // Per-site layout: a tab of this site that starts playing is upmixed with the layout saved here, no click needed.
 async function saveRule() {
   const a = await activeSite();

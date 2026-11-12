@@ -11,7 +11,7 @@ let replaced = false, capSpeakers = null;
 // An offscreen document only has chrome.runtime (no chrome.storage): reading the bridge's reply must never depend on
 // it, so the device is handed to the background script, which stores it for the popup.
 function rememberDevice(m) {
-  try { chrome.runtime.sendMessage({ type: "ksf-device", device: { bed: m.bed, objects: m.objects || 0, name: m.device, t: Date.now() } }).catch(() => {}); } catch (e) { /* not important */ }
+  try { chrome.runtime.sendMessage({ type: "ksf-device", device: { bed: m.bed, objects: m.objects || 0, name: m.device, version: m.version || "", t: Date.now() } }).catch(() => {}); } catch (e) { /* not important */ }
 }
 
 function setStatus(patch) {

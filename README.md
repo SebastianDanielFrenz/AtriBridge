@@ -18,7 +18,7 @@ music page --(ws://127.0.0.1:47321, float32 stereo)--> ksf-spatial-bridge --(ISp
    Theater* (or DTS:X / Windows Sonic) for it.
 2. Run `ksf-spatial-bridge.exe`. A tray icon appears (right-click: status, *Start with Windows*, *Quit*).
    Windows SmartScreen may warn about an unsigned app; the source is here, build it yourself if in doubt.
-3. Open the music page. The output button in the player bar changes to e.g. `7.1.4 all`; while the
+3. Open the music page. The output button in the player bar changes to e.g. `7.0.4 all` (ear-level speakers plus 4 heights, with the Heights switch on; with it off `7.0 all`); while the
    app is connected the browser's own output is silent and the app plays.
 
 The app follows the Windows default output: when you switch it (or Steam Remote Play does), the stream reopens on the new

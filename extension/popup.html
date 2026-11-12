@@ -4,14 +4,13 @@
 <h1>Surround upmix</h1>
 <label for="layout">Layout</label>
 <select id="layout"></select>
-<p class="hint" id="hint"></p>
+<p class="hint" id="hint" hidden></p>
 <button id="go">Upmix this tab</button>
-<p id="state" role="status"></p>
+<p id="state" role="status" hidden></p>
 <hr>
 <label class="check"><input type="checkbox" id="pauseOthers"> Pause the other tabs when one starts playing</label>
 <label class="check"><input type="checkbox" id="siteRule"> <span id="siteRuleText">Always upmix this site with this layout</span></label>
-<button id="addSite" class="secondary">Also pause on this site</button>
-<p class="hint" id="lastPlaying"></p>
+<p class="hint" id="lastPlaying" hidden></p>
 <p class="hint" id="siteHint"></p>
 <p id="warn" class="warn" hidden></p>
 <p class="version" id="version"></p>

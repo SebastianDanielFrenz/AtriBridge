@@ -1,7 +1,7 @@
 {
- "version": "1.2.6",
+ "version": "1.2.7",
  "url": "ksf-spatial-bridge.exe",
- "size": 318976,
- "sha256": "0a94937ebb5d19128cc004954bbdd8662d6e77a90325471f33e99954c8fb129a",
- "sig": "eGHQHTc/WI4yALjPvDy7lxXVgN2YEedNKgGOoZEFvSWspffrcM3T0CqUyiMwxHyUf4xHULY/T2EQjezpGs07iA=="
+ "size": 325120,
+ "sha256": "454d98c9d3f50841094c260137a0ca3675db25b94c9c1837b2461a909cde51f3",
+ "sig": "spv6Q0fP17WgUo2h0T9KB2A1/CVqPIwBniwhG5Hc4/X3KISOq2c2w1ToE1K0YQX75oQVRI9MmKLUG24GI2To9g=="
 }

@@ -55,12 +55,14 @@
           if (port !== mine) return;
           if (m.t === "ws") { r.step = m.s; return; }
           if (m.t === "info") { r.live = true; r.wasLive = true; r.state = "live"; e.setBridge(true); }
-          else if (m.t === "superseded") { r.blocked = true; r.live = false; r.state = "taken"; e.setBridge(false); r.drop(); if (owner === e) owner = null; }   // another route of THIS page took it: no pause
+          else if (m.t === "superseded") { r.blocked = !e.el.paused; r.live = false; r.state = "taken"; e.setBridge(false); r.drop(); if (owner === e) owner = null; }   // another route of THIS page took it: no pause
           else if (m.t === "gone" || m.t === "closed" || m.t === "replaced") {
             r.live = false; r.state = m.t === "replaced" ? "taken" : m.t; e.setBridge(false);
             if (m.t === "replaced") {
               const had = r.wasLive; r.wasLive = false;                // the bridge went to another page: this one stops, and only a new play takes it back
-              r.blocked = true; r.drop(); if (owner === e) owner = null;
+              // Blocked only while the element still plays: the pause from the other tab usually lands BEFORE this notice, and a
+              // block set after the pause event was never cleared, so the next play stayed on plain stereo (user, 2026-11-12).
+              r.blocked = !e.el.paused; r.drop(); if (owner === e) owner = null;
               if (had && globalThis.KsfPauseHere) globalThis.KsfPauseHere("the bridge was taken by another page", e.el);   // only if it really had the bridge
             }
           }

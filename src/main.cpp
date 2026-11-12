@@ -102,7 +102,7 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
-constexpr const char *kVersion = "1.2.6";      // must equal --version given to tools/publish.py for this build
+constexpr const char *kVersion = "1.2.7";      // must equal --version given to tools/publish.py for this build
 // Where updates come from when nothing else is configured: the GitHub releases of this project (up to 1.2.5 it was the
 // AtriHord server). Own server or repository: --update-url / --update-github / spatial-bridge.conf.
 constexpr const char *kDefaultUpdateSource = "https://github.com/SebastianDanielFrenz/AtriBridge/releases/latest/download/latest.json";
@@ -634,6 +634,58 @@ void serve_client(SOCKET c, const std::vector<std::string> &extra_origins, const
     g_count = 0;
 }
 
+// A passive probe (1.2.7+): ws://127.0.0.1:PORT/probe answers once with the same "info" (or "gone") a real connection gets
+// and closes. It is never the current client, so it does not replace the page or extension that is playing: a page can
+// learn what the device offers without taking the app from someone else.
+void serve_probe(SOCKET c, const std::vector<std::string> &extra_origins) {
+    DWORD to = 500;
+    setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, (const char *)&to, sizeof(to));
+    std::atomic<bool> never{false};
+    std::string req;
+    char ch;
+    while (req.size() < 8192 && req.find("\r\n\r\n") == std::string::npos) {
+        if (!recv_exact(c, &ch, 1, never)) return;
+        req += ch;
+    }
+    auto header = [&](const char *name) {
+        std::string low = req, lk = std::string("\r\n") + name + ":";
+        std::transform(low.begin(), low.end(), low.begin(), [](unsigned char x) { return (char)std::tolower(x); });
+        std::transform(lk.begin(), lk.end(), lk.begin(), [](unsigned char x) { return (char)std::tolower(x); });
+        size_t p = low.find(lk);
+        if (p == std::string::npos) return std::string();
+        p += lk.size();
+        size_t e = req.find("\r\n", p);
+        std::string v = req.substr(p, e - p);
+        size_t a = v.find_first_not_of(" \t");
+        return a == std::string::npos ? std::string() : v.substr(a);
+    };
+    std::string key = header("Sec-WebSocket-Key");
+    if (key.empty() || !origin_allowed(header("Origin"), extra_origins)) {
+        const char *no = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        send_all(c, no, (int)std::strlen(no));
+        return;
+    }
+    std::string resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept_key(key) + "\r\n\r\n";
+    if (!send_all(c, resp.data(), (int)resp.size())) return;
+    bool ok;
+    { std::lock_guard<std::mutex> lock(g_mu); ok = g_spatial_ok || g_null; }
+    send_frame(c, 1, ok ? info_json() : std::string("{\"type\":\"gone\"}"));
+    send_frame(c, 8, std::string());
+}
+
+// True when the connection's request line is "GET /probe ..." (peeked, not consumed; a client that has not sent it
+// within 300 ms is treated as an ordinary one).
+bool is_probe_request(SOCKET c) {
+    fd_set fds;
+    FD_ZERO(&fds);
+    FD_SET(c, &fds);
+    timeval tv{0, 300000};
+    if (select(0, &fds, nullptr, nullptr, &tv) <= 0) return false;
+    char buf[32];
+    int n = recv(c, buf, sizeof(buf), MSG_PEEK);
+    return n >= 11 && std::memcmp(buf, "GET /probe ", 11) == 0;
+}
+
 void net_thread(int port, std::vector<std::string> extra_origins) {
     boost_net_thread();
     SOCKET ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -664,6 +716,15 @@ void net_thread(int port, std::vector<std::string> extra_origins) {
         if (select(0, &fds, nullptr, nullptr, &tv) <= 0) continue;
         SOCKET c = accept(ls, nullptr, nullptr);
         if (c == INVALID_SOCKET) continue;
+        if (is_probe_request(c)) {                          // a passive probe never replaces the playing client
+            auto pdone = std::make_shared<std::atomic<bool>>(false);
+            clients.push_back({std::thread([c, pdone, &extra_origins] {
+                serve_probe(c, extra_origins);
+                closesocket(c);
+                *pdone = true;
+            }), pdone});
+            continue;
+        }
         SOCKET old = current.exchange(c);                   // a new page replaces the old connection
         if (old != INVALID_SOCKET) shutdown(old, SD_RECEIVE);        // stop reading it; its thread still tells it it was replaced
         auto done = std::make_shared<std::atomic<bool>>(false);
