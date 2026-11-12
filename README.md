@@ -16,7 +16,9 @@ music page --(ws://127.0.0.1:47321, float32 stereo)--> ksf-spatial-bridge --(ISp
 
 1. Windows Sound settings: pick your AV receiver / TV output and switch on *Dolby Atmos for Home
    Theater* (or DTS:X / Windows Sonic) for it.
-2. Run `ksf-spatial-bridge.exe`. A tray icon appears (right-click: status, *Start with Windows*, *Quit*).
+2. Run `ksf-spatial-bridge.exe` (from anywhere, e.g. Downloads: from 1.2.8 it moves itself to `%LOCALAPPDATA%\KsfSpatialBridge\`, takes
+   `spatial-bridge.conf` along and deletes the original, so *Start with Windows* and the self-update never point into a
+   folder that gets cleaned out; `--no-move` keeps it in place). A tray icon appears (right-click: status, *Start with Windows*, *Quit*).
    Windows SmartScreen may warn about an unsigned app; the source is here, build it yourself if in doubt.
 3. Open the music page. The output button in the player bar changes to e.g. `7.0.4 all` (ear-level speakers plus 4 heights, with the Heights switch on; with it off `7.0 all`); while the
    app is connected the browser's own output is silent and the app plays.

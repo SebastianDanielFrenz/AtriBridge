@@ -102,7 +102,7 @@ struct Settings {
 
 std::atomic<bool> g_quit{false};
 std::atomic<bool> g_null{false};
-constexpr const char *kVersion = "1.2.7";      // must equal --version given to tools/publish.py for this build
+constexpr const char *kVersion = "1.2.8";      // must equal --version given to tools/publish.py for this build
 // Where updates come from when nothing else is configured: the GitHub releases of this project (up to 1.2.5 it was the
 // AtriHord server). Own server or repository: --update-url / --update-github / spatial-bridge.conf.
 constexpr const char *kDefaultUpdateSource = "https://github.com/SebastianDanielFrenz/AtriBridge/releases/latest/download/latest.json";
@@ -1232,6 +1232,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     std::FILE *fp_ = nullptr;
     int port = 47321;
     DWORD after_update_pid = 0;
+    std::wstring moved_from;                              // set by the copy that moved the program here: delete that file
+    bool no_move = false;
     bool want_log = false;
     std::vector<std::string> origins;
     int argc = 0;
@@ -1252,6 +1254,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         else if (a == L"--no-update") g_auto_update = false;
         else if (a == L"--log") want_log = true;
         else if (a == L"--after-update" && i + 1 < argc) after_update_pid = (DWORD)_wtoi(argv[++i]);
+        else if (a == L"--moved-from" && i + 1 < argc) moved_from = argv[++i];
+        else if (a == L"--no-move") no_move = true;
         else if (a == L"--help") {
             if (AttachConsole(ATTACH_PARENT_PROCESS)) freopen_s(&fp_, "CONOUT$", "w", stdout);
             std::printf("ksf-spatial-bridge [--port N] [--origin URL] [--null] [--normal-priority] [--update-url URL] [--update-github OWNER/REPO] [--no-update] [--log]\n");
@@ -1260,6 +1264,40 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     }
     if (g_null) {
         if (AttachConsole(ATTACH_PARENT_PROCESS)) { freopen_s(&fp_, "CONOUT$", "w", stdout); }
+    }
+    // Where the program lives: %LOCALAPPDATA%\KsfSpatialBridge. Started from anywhere else (Downloads, the desktop) it
+    // moves itself there first (copy, start the copy, the copy deletes the original), so the "Start with Windows" entry
+    // and the self-update never point into a folder that gets cleaned out. Not in test mode, after an update, or with
+    // --no-move; if the copy cannot be made (a protected folder, or a copy already running there) it simply runs in place.
+    if (!g_null && !no_move && !after_update_pid) {
+        wchar_t self[MAX_PATH], env[MAX_PATH];
+        GetModuleFileNameW(nullptr, self, MAX_PATH);
+        DWORD n = ExpandEnvironmentStringsW(L"%LOCALAPPDATA%", env, MAX_PATH);
+        std::wstring dir = (n > 0 && n < MAX_PATH ? std::wstring(env) : std::wstring()) + L"\\KsfSpatialBridge";
+        std::wstring here = self, dest = dir + L"\\ksf-spatial-bridge.exe";
+        size_t cut = here.find_last_of(L'\\');
+        std::wstring here_dir = here.substr(0, cut);
+        if (n > 0 && n < MAX_PATH && _wcsicmp(here_dir.c_str(), dir.c_str()) != 0) {
+            CreateDirectoryW(dir.c_str(), nullptr);
+            if (CopyFileW(here.c_str(), dest.c_str(), FALSE)) {
+                CopyFileW((here_dir + L"\\spatial-bridge.conf").c_str(), (dir + L"\\spatial-bridge.conf").c_str(), TRUE);   // settings go along, an existing one is kept
+                std::wstring all = GetCommandLineW();
+                size_t sp = all.size();
+                if (!all.empty() && all[0] == L'"') { size_t q = all.find(L'"', 1); sp = q == std::wstring::npos ? all.size() : q + 1; }
+                else { size_t q = all.find(L' '); sp = q == std::wstring::npos ? all.size() : q; }
+                std::wstring cmd = L"\"" + dest + L"\" --after-update " + std::to_wstring(GetCurrentProcessId()) + L" --moved-from \"" + here + L"\"" + all.substr(sp);
+                STARTUPINFOW si{};
+                si.cb = sizeof(si);
+                PROCESS_INFORMATION pi{};
+                std::vector<wchar_t> buf(cmd.begin(), cmd.end());
+                buf.push_back(0);
+                if (CreateProcessW(dest.c_str(), buf.data(), nullptr, nullptr, FALSE, 0, nullptr, dir.c_str(), &si, &pi)) {
+                    CloseHandle(pi.hThread);
+                    CloseHandle(pi.hProcess);
+                    return 0;
+                }
+            }
+        }
     }
     // Settings that must survive the autostart (which carries no arguments): spatial-bridge.conf next to the exe,
     // lines  update-url=https://...  |  update-github=owner/repo  |  update=off  |  origin=https://...
@@ -1289,6 +1327,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (g_update_sources.empty()) g_update_sources.push_back(kDefaultUpdateSource);
     }
     upd::wait_for_predecessor(after_update_pid);          // a restart after an update: let the old copy end first
+    if (!moved_from.empty()) {                            // moved here from another folder: remove the original, point autostart here
+        for (int i = 0; i < 40 && !DeleteFileW(moved_from.c_str()) && GetLastError() != ERROR_FILE_NOT_FOUND; ++i) Sleep(250);
+        if (autostart_on()) set_autostart(true);
+    }
     upd::remove_old_copy();
     // One copy only.
     HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\KsfSpatialBridge");
